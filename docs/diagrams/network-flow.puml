@@ -1,0 +1,95 @@
+@startuml
+!theme plain
+title Ollama Chat Demo - 채팅 요청 처리 흐름 (RAG 포함)
+
+skinparam participant {
+    BackgroundColor<<frontend>> #E3F2FD
+    BackgroundColor<<backend>> #E8F5E9
+    BackgroundColor<<search>> #FFF3E0
+    BackgroundColor<<infra>> #ECEFF1
+}
+
+participant "React\n(브라우저)" as FE <<frontend>>
+participant "FastAPI\nchat.py" as CHAT <<backend>>
+participant "vector_store\n(BM25+TF-IDF)" as VS <<search>>
+database "MySQL\n:3306" as DB <<infra>>
+participant "Ollama\n:11434" as LLM <<infra>>
+
+== 채팅 요청 ==
+
+FE -> CHAT : POST /api/conversations/{id}/chat\n{ message: "질문 내용" }
+activate CHAT
+
+CHAT -> DB : SELECT conversations\nWITH messages, attachments
+DB --> CHAT : 대화 + 이력
+
+CHAT -> DB : INSERT messages\n(role: user)
+DB --> CHAT : 저장 완료
+
+== 1단계 RAG: 문서 요약 매칭 ==
+
+CHAT -> DB : SELECT knowledge_documents\nWHERE status='ready'\nAND summary IS NOT NULL
+DB --> CHAT : 문서 요약 목록
+
+note right of CHAT
+  TF-IDF 코사인 유사도 계산
+  threshold: 0.01
+  → 우선 문서(priority_doc_ids) 결정
+end note
+
+== 2단계 RAG: 청크 검색 ==
+
+CHAT -> VS : search(query, n_results=10)
+activate VS
+note right of VS
+  BM25(0.5) + TF-IDF(0.5)
+  하이브리드 점수 계산
+  threshold: 0.05
+end note
+VS --> CHAT : 관련 청크 목록 (doc_id, content, score)
+deactivate VS
+
+note right of CHAT
+  우선 문서 청크를 앞에 배치
+  비우선 문서 청크를 뒤에 배치
+  최대 7건으로 제한
+  우선 문서는 요약도 컨텍스트에 추가
+end note
+
+== 시스템 프롬프트 구성 ==
+
+note right of CHAT
+  시스템 프롬프트 조합:
+  1. 사용자 설정 프롬프트
+  2. RAG 컨텍스트 (요약 + 청크)
+  3. 첨부파일 컨텍스트
+end note
+
+== LLM 스트리밍 응답 ==
+
+CHAT -> LLM : POST /api/chat\n{ model, messages, stream: true }
+activate LLM
+
+loop 토큰 스트리밍
+    LLM --> CHAT : { message: { thinking, content } }
+    CHAT --> FE : SSE: data: { thinking/token }
+end
+
+LLM --> CHAT : { done: true }
+deactivate LLM
+
+== 응답 완료 처리 ==
+
+CHAT -> DB : INSERT messages\n(role: assistant, references)
+DB --> CHAT : 저장 완료
+
+opt 첫 번째 메시지인 경우
+    CHAT -> LLM : POST /api/generate\n(자동 제목 생성)
+    LLM --> CHAT : { response: "제목" }
+    CHAT -> DB : UPDATE conversations\nSET title
+end
+
+CHAT --> FE : SSE: data: { done: true,\ntitle, references }
+deactivate CHAT
+
+@enduml

@@ -1,0 +1,27 @@
+<svg width="512" height="512" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="42%" cy="36%" r="65%">
+      <stop offset="0%" stop-color="#CADAD2"/>
+      <stop offset="100%" stop-color="#5A8878"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="40%" cy="28%" r="45%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <circle cx="50" cy="50" r="47" fill="url(#bg)"/>
+  <circle cx="50" cy="50" r="47" fill="url(#shine)"/>
+
+  <!-- Unified rounded arrow — rotated 90° clockwise to point right -->
+  <path d="M 50 16
+           L 71 46 Q 76 52 68 52
+           L 63 52 Q 57 52 57 58
+           L 57 71 Q 57 76 52 76
+           L 48 76 Q 43 76 43 71
+           L 43 58 Q 43 52 37 52
+           L 32 52 Q 24 52 29 46
+           Z"
+        fill="#FFFFFF" opacity="0.9"
+        transform="rotate(90, 50, 50)"/>
+</svg>

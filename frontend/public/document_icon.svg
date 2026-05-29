@@ -1,0 +1,52 @@
+<svg width="512" height="512" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Back page (blue) — bloom petal 4 palette -->
+    <linearGradient id="d1" x1="10%" y1="5%" x2="85%" y2="95%">
+      <stop offset="0%" stop-color="#D8E8FF"/>
+      <stop offset="100%" stop-color="#7AA8E8"/>
+    </linearGradient>
+    <!-- Middle page (purple) — bloom petal 3 palette -->
+    <linearGradient id="d2" x1="10%" y1="5%" x2="85%" y2="95%">
+      <stop offset="0%" stop-color="#E4D4FF"/>
+      <stop offset="100%" stop-color="#9B7AE0"/>
+    </linearGradient>
+    <!-- Front page (peach) — bloom petal 1 palette -->
+    <linearGradient id="d3" x1="10%" y1="5%" x2="85%" y2="95%">
+      <stop offset="0%" stop-color="#FFE8D4"/>
+      <stop offset="100%" stop-color="#FF9B7A"/>
+    </linearGradient>
+
+    <!-- Fold flap gradients (lighter, suggesting paper underside catching light) -->
+    <linearGradient id="f1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EEF5FF"/>
+      <stop offset="100%" stop-color="#B8D0F0"/>
+    </linearGradient>
+    <linearGradient id="f2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F4EEFF"/>
+      <stop offset="100%" stop-color="#C0A8E8"/>
+    </linearGradient>
+    <linearGradient id="f3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFF4EC"/>
+      <stop offset="100%" stop-color="#FFCCA8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Back page (blue): offset +8,+8 from front -->
+  <path d="M 26 20 L 63 20 L 76 33 L 76 82 L 26 82 Z" fill="url(#d1)"/>
+  <path d="M 63 20 L 76 33 L 63 33 Z" fill="url(#f1)"/>
+
+  <!-- Middle page (purple): offset +4,+4 from front -->
+  <path d="M 22 16 L 59 16 L 72 29 L 72 78 L 22 78 Z" fill="url(#d2)"/>
+  <path d="M 59 16 L 72 29 L 59 29 Z" fill="url(#f2)"/>
+
+  <!-- Front page (peach): document with dog-ear fold at top-right -->
+  <path d="M 18 12 L 55 12 L 68 25 L 68 74 L 18 74 Z" fill="url(#d3)"/>
+  <path d="M 55 12 L 68 25 L 55 25 Z" fill="url(#f3)"/>
+
+  <!-- Text lines suggesting document content -->
+  <line x1="25" y1="34" x2="59" y2="34" stroke="#FFFFFF" stroke-width="2.2" stroke-opacity="0.65" stroke-linecap="round"/>
+  <line x1="25" y1="42" x2="61" y2="42" stroke="#FFFFFF" stroke-width="2.2" stroke-opacity="0.65" stroke-linecap="round"/>
+  <line x1="25" y1="50" x2="57" y2="50" stroke="#FFFFFF" stroke-width="2.2" stroke-opacity="0.65" stroke-linecap="round"/>
+  <line x1="25" y1="58" x2="60" y2="58" stroke="#FFFFFF" stroke-width="2.2" stroke-opacity="0.60" stroke-linecap="round"/>
+  <line x1="25" y1="66" x2="48" y2="66" stroke="#FFFFFF" stroke-width="2.2" stroke-opacity="0.45" stroke-linecap="round"/>
+</svg>

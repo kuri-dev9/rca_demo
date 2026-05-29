@@ -1,0 +1,63 @@
+@startuml
+!theme plain
+title Ollama Chat Demo - 데이터베이스 ERD
+
+skinparam linetype ortho
+
+entity "conversations" as conv {
+    * **id** : INT <<PK>> <<AUTO_INCREMENT>>
+    --
+    title : VARCHAR(255) = '새 대화'
+    model : VARCHAR(100) = 'gemma4:26b'
+    system_prompt : TEXT <<NULLABLE>>
+    created_at : DATETIME = CURRENT_TIMESTAMP
+    updated_at : DATETIME = CURRENT_TIMESTAMP
+}
+
+entity "messages" as msg {
+    * **id** : INT <<PK>> <<AUTO_INCREMENT>>
+    --
+    * conversation_id : INT <<FK>>
+    role : VARCHAR(20)
+    content : TEXT
+    references : JSON <<NULLABLE>>
+    created_at : DATETIME = CURRENT_TIMESTAMP
+}
+
+entity "attachments" as att {
+    * **id** : INT <<PK>> <<AUTO_INCREMENT>>
+    --
+    * conversation_id : INT <<FK>>
+    filename : VARCHAR(255)
+    content_text : TEXT
+    file_size : INT = 0
+    created_at : DATETIME = CURRENT_TIMESTAMP
+}
+
+entity "knowledge_documents" as kdoc {
+    * **id** : INT <<PK>> <<AUTO_INCREMENT>>
+    --
+    filename : VARCHAR(255)
+    file_size : INT = 0
+    chunk_count : INT = 0
+    summary : TEXT <<NULLABLE>>
+    status : VARCHAR(20) = 'processing'
+    error_message : TEXT <<NULLABLE>>
+    created_at : DATETIME = CURRENT_TIMESTAMP
+}
+
+conv ||--o{ msg : "contains\n(CASCADE)"
+conv ||--o{ att : "contains\n(CASCADE)"
+
+note right of kdoc
+  독립 테이블
+  vector_store의 index.pkl과
+  doc_id로 연결 (애플리케이션 레벨)
+end note
+
+note bottom of msg
+  references JSON 구조:
+  [{ filename, score, matched_summary }]
+end note
+
+@enduml

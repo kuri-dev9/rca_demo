@@ -1,0 +1,87 @@
+@startuml
+!theme plain
+title Ollama Chat Demo - 시스템 구성도
+
+skinparam rectangle {
+    BackgroundColor<<presentation>> #E3F2FD
+    BackgroundColor<<api>> #E8F5E9
+    BackgroundColor<<business>> #FFF3E0
+    BackgroundColor<<infra>> #ECEFF1
+}
+
+skinparam component {
+    BackgroundColor<<presentation>> #E3F2FD
+    BackgroundColor<<api>> #E8F5E9
+    BackgroundColor<<business>> #FFF3E0
+    BackgroundColor<<infra>> #ECEFF1
+}
+
+rectangle "프레젠테이션 계층" <<presentation>> {
+    component "App.tsx\n(상태 관리)" as app <<presentation>>
+    component "Sidebar.tsx\n(대화 목록/검색)" as sidebar <<presentation>>
+    component "ChatInput.tsx\n(메시지 입력)" as chatinput <<presentation>>
+    component "ChatMessage.tsx\n(마크다운 렌더링)" as chatmsg <<presentation>>
+    component "KnowledgePanel.tsx\n(지식 저장소)" as knowledge_ui <<presentation>>
+    component "SystemPromptEditor.tsx\n(프롬프트 설정)" as sysprompt_ui <<presentation>>
+    component "ModelSelector.tsx" as model_ui <<presentation>>
+    component "ThemeToggle.tsx" as theme_ui <<presentation>>
+    component "api.ts\n(HTTP/SSE 클라이언트)" as apits <<presentation>>
+}
+
+rectangle "API 계층 (FastAPI :8000)" <<api>> {
+    component "conversations.py\n(CRUD/검색/내보내기)" as conv_api <<api>>
+    component "chat.py\n(SSE 스트리밍)" as chat_api <<api>>
+    component "models.py\n(모델 목록)" as model_api <<api>>
+    component "attachments.py\n(파일 첨부)" as attach_api <<api>>
+    component "knowledge.py\n(지식 문서 관리)" as know_api <<api>>
+}
+
+rectangle "비즈니스 로직 계층" <<business>> {
+    component "2-Stage RAG\n파이프라인" as rag <<business>>
+    component "vector_store.py\n(BM25+TF-IDF)" as vecstore <<business>>
+    component "file_parser.py\n(문서 텍스트 추출)" as parser <<business>>
+    component "chunker.py\n(텍스트 분할)" as chunker <<business>>
+}
+
+rectangle "인프라 계층" <<infra>> {
+    database "MySQL 8.4\n:3306\nchat_demo" as mysql <<infra>>
+    component "Ollama\n:11434\n(LLM Server)" as ollama <<infra>>
+    file "knowledge_data/\nindex.pkl" as indexfile <<infra>>
+}
+
+' 프론트엔드 내부 연결
+app --> sidebar
+app --> chatinput
+app --> chatmsg
+app --> knowledge_ui
+app --> sysprompt_ui
+app --> model_ui
+app --> theme_ui
+app --> apits
+
+' 프론트 → API
+apits --> conv_api : "REST\n(CRUD/검색/내보내기)"
+apits --> chat_api : "SSE\n(스트리밍 채팅)"
+apits --> model_api : "REST\n(모델 목록)"
+apits --> attach_api : "REST\n(파일 업로드)"
+apits --> know_api : "REST\n(지식 문서)"
+
+' API → 비즈니스
+chat_api --> rag : "RAG 검색"
+know_api --> parser : "텍스트 추출"
+know_api --> chunker : "청크 분할"
+know_api --> vecstore : "인덱스 추가"
+attach_api --> parser : "텍스트 추출"
+rag --> vecstore : "하이브리드 검색"
+
+' API/비즈니스 → 인프라
+conv_api --> mysql : "SQL\n(aiomysql)"
+chat_api --> mysql : "SQL"
+chat_api --> ollama : "HTTP\n/api/chat (스트리밍)\n/api/generate (제목)"
+attach_api --> mysql : "SQL"
+know_api --> mysql : "SQL"
+know_api --> ollama : "HTTP\n/api/generate (요약)"
+model_api --> ollama : "HTTP\n/api/tags"
+vecstore --> indexfile : "pickle\n(저장/로드)"
+
+@enduml

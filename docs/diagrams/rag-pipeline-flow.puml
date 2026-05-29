@@ -1,0 +1,88 @@
+@startuml
+!theme plain
+title Ollama Chat Demo - 2-Stage RAG 파이프라인 처리 흐름
+
+|chat.py|
+start
+:사용자 질문 수신;
+
+|chat.py|
+:사용자 메시지 DB 저장;
+
+floating note left: **1단계: 문서 요약 매칭**
+
+|chat.py|
+:KnowledgeDocument 로드
+(status=ready, summary IS NOT NULL);
+
+if (요약 있는 문서 존재?) then (예)
+    :TF-IDF 코사인 유사도 계산
+    (질문 vs 각 문서 요약);
+
+    :유사도 >= 0.01인 문서를
+    우선 문서(priority_doc_ids)로 선정;
+else (아니오)
+    :우선 문서 없음;
+endif
+
+floating note left: **2단계: 청크 검색**
+
+|vector_store.py|
+:BM25 스코어 계산;
+:TF-IDF 코사인 유사도 계산;
+:하이브리드 점수 = BM25×0.5 + TF-IDF×0.5;
+:상위 10건 반환 (threshold: 0.05);
+
+|chat.py|
+if (우선 문서 존재?) then (예)
+    :우선 문서 청크를 앞에 배치;
+    :비우선 문서 청크를 뒤에 배치;
+    :최대 7건으로 제한;
+
+    :우선 문서의 요약을
+    컨텍스트에 추가;
+else (아니오)
+    :최대 5건으로 제한;
+endif
+
+floating note left: **시스템 프롬프트 구성**
+
+|chat.py|
+fork
+    :사용자 시스템 프롬프트;
+fork again
+    :RAG 컨텍스트
+    (요약 + 청크);
+fork again
+    :첨부파일 컨텍스트
+    (content_text[:8000]);
+end fork
+
+:시스템 프롬프트 조합;
+:대화 이력 messages 배열 구성;
+
+floating note left: **LLM 호출**
+
+|Ollama|
+:POST /api/chat (stream: true);
+
+|chat.py|
+:SSE 토큰 스트리밍 전송;
+
+:응답 완료;
+:AI 메시지 DB 저장
+(references 포함);
+
+if (첫 메시지?) then (예)
+    |Ollama|
+    :POST /api/generate
+    (자동 제목 생성);
+    |chat.py|
+    :대화 제목 업데이트;
+else (아니오)
+endif
+
+:SSE done 이벤트 전송;
+stop
+
+@enduml

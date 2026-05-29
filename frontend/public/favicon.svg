@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- 배경: 깊은 물빛 그라데이션 -->
+  <defs>
+    <linearGradient id="waterGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4facfe;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00f2fe;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- 반짝이는 빛 효과 (Glow) -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 물결 모양 베이스 -->
+  <path d="M0 50 Q 25 30, 50 50 T 100 50 V 100 H 0 Z" fill="url(#waterGradient)" opacity="0.8"/>
+  <path d="M0 70 Q 25 50, 50 70 T 100 70 V 100 H 0 Z" fill="#0077be" opacity="0.5"/>
+
+  <!-- 윤슬 (반짝이는 별 모양) -->
+  <!-- 첫 번째 빛: 별 중심(50,38)을 부모 g의 translate로 잡고, 내부 path는 원점 기준 좌표로 재정렬해 중심 기반 scale 애니메이션 적용 -->
+  <g transform="translate(50 38)">
+    <path class="sparkle" d="M0 -18 L3 -3 L18 0 L3 3 L0 18 L-3 3 L-18 0 L-3 -3 Z" fill="#fff" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.3;1" dur="3s" repeatCount="indefinite" />
+      <animateTransform attributeName="transform" type="scale" values="1;1.2;1" dur="3s" repeatCount="indefinite" />
+    </path>
+  </g>
+  
+  <!-- 두 번째 빛 (작은 점) -->
+  <circle cx="30" cy="40" r="2" fill="#fff" filter="url(#glow)">
+    <animate attributeName="opacity" values="0.2;1;0.2" dur="2s" repeatCount="indefinite" />
+  </circle>
+
+  <!-- 세 번째 빛 (작은 점) -->
+  <circle cx="75" cy="30" r="1.5" fill="#fff" filter="url(#glow)">
+    <animate attributeName="opacity" values="1;0.4;1" dur="4s" repeatCount="indefinite" />
+  </circle>
+</svg>

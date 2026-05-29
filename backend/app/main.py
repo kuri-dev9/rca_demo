@@ -35,6 +35,7 @@ app.include_router(models.router)
 app.include_router(attachments.router)
 app.include_router(knowledge.router)
 app.include_router(rca.router)
+app.include_router(rca.sample_router)
 
 
 @app.get("/api/health")

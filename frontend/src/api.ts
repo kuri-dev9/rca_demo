@@ -198,6 +198,20 @@ export async function uploadXdrFile(file: File, model: string): Promise<RcaResul
   return res.json();
 }
 
+export async function analyzeSampleXdr(model: string): Promise<RcaResult> {
+  const formData = new FormData();
+  formData.append('model', model);
+  const res = await fetch(`${API_BASE}/v1/analysis/sample`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json().catch(() => ({ detail: '알 수 없는 오류' }));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.message || data.detail || '샘플 RCA 분석 실패');
+  }
+  return data;
+}
+
 export function streamRcaReport(
   convId: number,
   onToken: (token: string) => void,

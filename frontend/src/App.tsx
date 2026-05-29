@@ -21,6 +21,7 @@ import {
   exportConversation,
   importConversation,
   uploadXdrFile,
+  analyzeSampleXdr,
   streamRcaReport,
 } from './api';
 import './App.css';
@@ -251,6 +252,35 @@ function App() {
     abortRef.current = controller;
   };
 
+  const showRcaResult = async (result: any, userContent: string) => {
+    const convId = result.conversation_id;
+    setActiveConvId(convId);
+    activeConvIdRef.current = convId;
+    setCurrentSystemPrompt('');
+    setAttachments([]);
+    setStreamingContent('');
+    setThinkingContent('');
+    resetStreamingDebugPrompts();
+    setMessages([
+      {
+        id: Date.now() - 1,
+        conversation_id: convId,
+        role: 'user',
+        content: userContent,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: Date.now(),
+        conversation_id: convId,
+        role: 'assistant',
+        content: result.assistant_message,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+    await loadConversations();
+    startRcaReport(convId);
+  };
+
   const handleRcaFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -258,33 +288,21 @@ function App() {
     setRcaLoading(true);
     try {
       const result = await uploadXdrFile(file, selectedModel);
-      const convId = result.conversation_id;
-      setActiveConvId(convId);
-      activeConvIdRef.current = convId;
-      setCurrentSystemPrompt('');
-      setAttachments([]);
-      setStreamingContent('');
-      setThinkingContent('');
-      resetStreamingDebugPrompts();
-      setMessages([
-        {
-          id: Date.now() - 1,
-          conversation_id: convId,
-          role: 'user',
-          content: `xDR 파일 RCA 분석: ${file.name}`,
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: Date.now(),
-          conversation_id: convId,
-          role: 'assistant',
-          content: result.assistant_message,
-          created_at: new Date().toISOString(),
-        },
-      ]);
-      await loadConversations();
+      await showRcaResult(result, `xDR 파일 RCA 분석: ${file.name}`);
       setRcaLoading(false);
-      startRcaReport(convId);
+    } catch (err: any) {
+      alert(`RCA 분석 실패: ${err.message}`);
+      setRcaLoading(false);
+    }
+  };
+
+  const handleSampleRca = async () => {
+    if (rcaLoading || streaming) return;
+    setRcaLoading(true);
+    try {
+      const result = await analyzeSampleXdr(selectedModel);
+      await showRcaResult(result, 'xDR 샘플 RCA 분석');
+      setRcaLoading(false);
     } catch (err: any) {
       alert(`RCA 분석 실패: ${err.message}`);
       setRcaLoading(false);
@@ -481,6 +499,15 @@ function App() {
               style={{ opacity: rcaLoading || streaming ? 0.6 : 1 }}
             >
               {rcaLoading ? '분석 중...' : 'RCA 분석'}
+            </button>
+            <button
+              className="knowledge-btn"
+              onClick={handleSampleRca}
+              disabled={rcaLoading || streaming}
+              title="서버 내부 sample.dat RCA 분석"
+              style={{ opacity: rcaLoading || streaming ? 0.6 : 1 }}
+            >
+              샘플 분석
             </button>
             <input
               ref={rcaFileInputRef}

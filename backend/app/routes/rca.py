@@ -14,6 +14,7 @@ import os
 import resource
 import tempfile
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -31,10 +32,26 @@ from app.rca.parser import parse_file
 from app.rca.report_builder import build_semantic_summary, build_rca_messages
 
 router = APIRouter(prefix="/api/rca", tags=["rca"])
+sample_router = APIRouter(prefix="/api/v1/analysis", tags=["rca"])
 logger = logging.getLogger(__name__)
 
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
+_SAMPLE_FILE_CANDIDATES = [
+    Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
+    if os.environ.get("PROJ_HOME")
+    else None,
+    Path.cwd() / "docs" / "data" / "sample.dat",
+    Path(__file__).resolve().parents[2] / "docs" / "data" / "sample.dat",
+    Path(__file__).resolve().parents[3] / "docs" / "data" / "sample.dat",
+]
+
+
+def _sample_file_path() -> Path:
+    for path in _SAMPLE_FILE_CANDIDATES:
+        if path and path.exists():
+            return path
+    return Path.cwd() / "docs" / "data" / "sample.dat"
 
 
 def _rss_mb() -> float:
@@ -202,6 +219,54 @@ def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]
     }
 
 
+async def _analyze_file_path(
+    filepath: str,
+    filename: str,
+    model: str,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    records = analysis = semantic_summary = assistant_message = response = None
+    try:
+        logger.debug("rca memory before_parse rss_mb=%.1f", _rss_mb())
+        records, parse_stats = await asyncio.to_thread(parse_file, filepath)
+        logger.debug("rca memory after_parse rss_mb=%.1f records=%s", _rss_mb(), parse_stats.get("parsed", 0))
+        if parse_stats.get("parsed", 0) <= 0:
+            raise HTTPException(status_code=422, detail="파싱 가능한 레코드가 없습니다")
+
+        analysis = await asyncio.to_thread(analyze, records, parse_stats)
+        logger.debug("rca memory after_analysis rss_mb=%.1f", _rss_mb())
+
+        semantic_summary = build_semantic_summary(analysis)
+        conv = Conversation(
+            title=f"RCA: {filename}",
+            model=model or RCA_MODEL,
+            system_prompt=json.dumps(semantic_summary, ensure_ascii=False),
+        )
+        db.add(conv)
+        await db.flush()
+
+        assistant_message = _analysis_to_markdown(analysis)
+        db.add(Message(
+            conversation_id=conv.id,
+            role="user",
+            content=f"xDR 파일 RCA 분석: {filename}",
+        ))
+        db.add(Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content=assistant_message,
+        ))
+        await db.commit()
+        await db.refresh(conv)
+
+        response = _analysis_to_response(analysis, conv.id)
+        return response
+    finally:
+        del records, analysis, semantic_summary, assistant_message, response
+        gc.collect()
+        logger.debug("rca memory after_cleanup rss_mb=%.1f", _rss_mb())
+
+
 @router.post("/analyze")
 async def analyze_xdr(
     file: UploadFile = File(...),
@@ -234,72 +299,23 @@ async def analyze_xdr(
             raise HTTPException(status_code=500, detail=f"파일 저장 실패: {exc}") from exc
 
     try:
-        logger.debug("rca memory before_parse rss_mb=%.1f", _rss_mb())
-        # Polars 파싱은 동기 → asyncio.to_thread 사용
-        records, parse_stats = await asyncio.to_thread(parse_file, tmp_path)
-        logger.debug("rca memory after_parse rss_mb=%.1f records=%s", _rss_mb(), parse_stats.get("parsed", 0))
-        if parse_stats.get("parsed", 0) <= 0:
-            raise HTTPException(status_code=422, detail="파싱 가능한 레코드가 없습니다")
-
-        # 분석
-        analysis: RcaAnalysis = await asyncio.to_thread(analyze, records, parse_stats)
-        logger.debug("rca memory after_analysis rss_mb=%.1f", _rss_mb())
-
-        semantic_summary = build_semantic_summary(analysis)
-
-        # Conversation 생성: system_prompt에 semantic summary JSON 저장 (LLM 보고서 재생성용)
-        conv = Conversation(
-            title=f"RCA: {file.filename}",
-            model=model or RCA_MODEL,
-            system_prompt=json.dumps(semantic_summary, ensure_ascii=False),
-        )
-        db.add(conv)
-        await db.flush()
-
-        assistant_message = _analysis_to_markdown(analysis)
-        db.add(Message(
-            conversation_id=conv.id,
-            role="user",
-            content=f"xDR 파일 RCA 분석: {file.filename}",
-        ))
-        db.add(Message(
-            conversation_id=conv.id,
-            role="assistant",
-            content=assistant_message,
-        ))
-        await db.commit()
-        await db.refresh(conv)
-
-        response = _analysis_to_response(analysis, conv.id)
-        return response
-
+        return await _analyze_file_path(tmp_path, file.filename, model or RCA_MODEL, db)
     finally:
-        try:
-            del records
-        except UnboundLocalError:
-            pass
-        try:
-            del analysis
-        except UnboundLocalError:
-            pass
-        try:
-            del semantic_summary
-        except UnboundLocalError:
-            pass
-        try:
-            del assistant_message
-        except UnboundLocalError:
-            pass
-        try:
-            del response
-        except UnboundLocalError:
-            pass
-        gc.collect()
-        logger.debug("rca memory after_cleanup rss_mb=%.1f", _rss_mb())
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+@sample_router.post("/sample")
+async def analyze_sample_xdr(
+    model: str = Form(RCA_MODEL),
+    db: AsyncSession = Depends(get_db),
+):
+    sample_file_path = _sample_file_path()
+    if not sample_file_path.exists():
+        return {"success": False, "message": "sample file not found"}
+    return await _analyze_file_path(str(sample_file_path), sample_file_path.name, model or RCA_MODEL, db)
 
 
 @router.get("/conversations/{conv_id}/report")

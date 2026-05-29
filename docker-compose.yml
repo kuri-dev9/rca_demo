@@ -27,6 +27,7 @@ services:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
     volumes:
       - knowledge_data:/app/knowledge_data
+      - ./docs/data:/app/docs/data:ro
     ports:
       - "8000:8000"
     depends_on:

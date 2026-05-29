@@ -22,3 +22,6 @@ frontend/build/
 
 # Knowledge base data
 backend/knowledge_data/
+
+# Data
+docs/data/

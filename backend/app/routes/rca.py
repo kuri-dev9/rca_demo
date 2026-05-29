@@ -29,7 +29,13 @@ from app.models import Conversation, Message
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
 from app.rca.parser import parse_file
-from app.rca.report_builder import build_semantic_summary, build_rca_messages
+from app.rca.report_builder import (
+    build_compact_rca_ir,
+    build_compact_reasoning_json,
+    build_semantic_summary,
+    build_rca_messages,
+    build_reasoning_messages,
+)
 
 router = APIRouter(prefix="/api/rca", tags=["rca"])
 sample_router = APIRouter(prefix="/api/v1/analysis", tags=["rca"])
@@ -219,13 +225,25 @@ def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]
     }
 
 
+def _parse_reasoning_json(text: str) -> Any:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return cleaned
+
+
 async def _analyze_file_path(
     filepath: str,
     filename: str,
     model: str,
     db: AsyncSession,
 ) -> dict[str, Any]:
-    records = analysis = semantic_summary = assistant_message = response = None
+    records = analysis = compact_rca_ir = assistant_message = response = None
     try:
         logger.debug("rca memory before_parse rss_mb=%.1f", _rss_mb())
         records, parse_stats = await asyncio.to_thread(parse_file, filepath)
@@ -236,11 +254,11 @@ async def _analyze_file_path(
         analysis = await asyncio.to_thread(analyze, records, parse_stats)
         logger.debug("rca memory after_analysis rss_mb=%.1f", _rss_mb())
 
-        semantic_summary = build_semantic_summary(analysis)
+        compact_rca_ir = build_compact_rca_ir(analysis)
         conv = Conversation(
             title=f"RCA: {filename}",
             model=model or RCA_MODEL,
-            system_prompt=json.dumps(semantic_summary, ensure_ascii=False),
+            system_prompt=json.dumps({"compact_rca_ir": compact_rca_ir}, ensure_ascii=False),
         )
         db.add(conv)
         await db.flush()
@@ -262,7 +280,7 @@ async def _analyze_file_path(
         response = _analysis_to_response(analysis, conv.id)
         return response
     finally:
-        del records, analysis, semantic_summary, assistant_message, response
+        del records, analysis, compact_rca_ir, assistant_message, response
         gc.collect()
         logger.debug("rca memory after_cleanup rss_mb=%.1f", _rss_mb())
 
@@ -379,6 +397,72 @@ async def stream_rca_report(
                 content=full_response,
             )
             db.add(msg_obj)
+            await db.commit()
+
+        yield f"data: {json.dumps({'done': True})}\n\n"
+        del response_parts, full_response
+        gc.collect()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.get("/conversations/{conv_id}/reasoning")
+async def stream_rca_reasoning(
+    conv_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
+    conv = result.scalar_one_or_none()
+    if not conv:
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다")
+    if not conv.system_prompt:
+        raise HTTPException(status_code=422, detail="RCA 컨텍스트가 없습니다")
+
+    try:
+        context = json.loads(conv.system_prompt)
+    except Exception:
+        raise HTTPException(status_code=422, detail="RCA 컨텍스트 파싱 실패")
+
+    if isinstance(context, dict) and "compact_rca_ir" in context:
+        compact_rca_ir = context["compact_rca_ir"]
+    else:
+        # Legacy conversations may still have the old full observability payload.
+        compact_rca_ir = build_compact_reasoning_json(context if isinstance(context, dict) else {})
+    messages = build_reasoning_messages(compact_rca_ir)
+
+    async def generate():
+        response_parts: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                llm_payload = {"model": conv.model or RCA_MODEL, "messages": messages, "stream": True}
+                yield prompt_debug_event(1, "RCA Reasoning Prompt", llm_payload)
+                async with client.stream(
+                    "POST",
+                    f"{settings.ollama_base_url}/api/chat",
+                    json=llm_payload,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        chunk = json.loads(line)
+                        content = chunk.get("message", {}).get("content", "")
+                        if content:
+                            response_parts.append(content)
+                            yield f"data: {json.dumps({'token': content})}\n\n"
+                        if chunk.get("done"):
+                            break
+        except httpx.HTTPError as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            return
+
+        full_response = "".join(response_parts)
+        if full_response.strip():
+            conv.system_prompt = json.dumps({
+                "compact_rca_ir": compact_rca_ir,
+                "rca_reasoning": full_response,
+            }, ensure_ascii=False)
+            db.add(Message(conversation_id=conv_id, role="assistant", content=full_response))
             await db.commit()
 
         yield f"data: {json.dumps({'done': True})}\n\n"

@@ -2,6 +2,7 @@ import json
 import logging
 import gc
 import re
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from app.models import Conversation, Message, Attachment, KnowledgeDocument
 from app.schemas import ChatRequest
 from app import vector_store
 from app.llm_debug import prompt_debug_event
+from app.rca.report_builder import build_report_prompt_from_reasoning
 from app.tokenizer import tokenize as _tokenize
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
@@ -72,6 +74,25 @@ def _format_system_prompt(system_prompt: str) -> str:
         "새로운 RCA 판단을 임의로 만들지 말고, 제공된 분석 결과와 통계 범위 안에서 설명하세요.\n\n"
         f"{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}"
     )
+
+
+def _is_rca_report_request(message: str) -> bool:
+    compact = message.replace(" ", "")
+    return "레포트작성" in compact or "보고서작성" in compact or "report" in message.lower()
+
+
+def _rca_context(system_prompt: str | None) -> tuple[Any, Any] | None:
+    if not system_prompt:
+        return None
+    try:
+        data = json.loads(system_prompt)
+    except Exception:
+        return None
+    if isinstance(data, dict) and "compact_rca_ir" in data and "rca_reasoning" in data:
+        return data["compact_rca_ir"], data["rca_reasoning"]
+    if isinstance(data, dict) and "rca_observability" in data and "rca_reasoning" in data:
+        return data["rca_observability"], data["rca_reasoning"]
+    return None
 
 
 def _build_title_payload(model: str, user_message: str, assistant_response: str) -> dict:
@@ -145,82 +166,89 @@ async def chat(
     await db.commit()
 
     messages = []
+    rca_report_context = _rca_context(conv.system_prompt)
+    render_rca_report = bool(rca_report_context and _is_rca_report_request(data.message))
 
     # RAG: 문서 요약 기반 우선 검색 + 청크 검색
     rag_context = ""
     rag_references = []
-    try:
-        # 1단계: 모든 지식 문서의 요약을 로드하여 질문과 유사도 비교
-        doc_result = await db.execute(
-            select(KnowledgeDocument).where(
-                KnowledgeDocument.status == "ready",
-                KnowledgeDocument.summary.isnot(None),
+    if not render_rca_report:
+        try:
+            # 1단계: 모든 지식 문서의 요약을 로드하여 질문과 유사도 비교
+            doc_result = await db.execute(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.status == "ready",
+                    KnowledgeDocument.summary.isnot(None),
+                )
             )
-        )
-        docs_with_summary = doc_result.scalars().all()
+            docs_with_summary = doc_result.scalars().all()
 
-        priority_doc_ids = set()
-        if docs_with_summary:
-            summaries = [
-                {"doc_id": d.id, "filename": d.filename, "summary": d.summary}
-                for d in docs_with_summary
-            ]
-            scored = _compute_summary_similarity(data.message, summaries)
-            # 유사도 0.01 이상인 문서를 우선 문서로 선정
-            priority_doc_ids = {s["doc_id"] for s in scored if s["similarity"] >= 0.01}
+            priority_doc_ids = set()
+            if docs_with_summary:
+                summaries = [
+                    {"doc_id": d.id, "filename": d.filename, "summary": d.summary}
+                    for d in docs_with_summary
+                ]
+                scored = _compute_summary_similarity(data.message, summaries)
+                # 유사도 0.01 이상인 문서를 우선 문서로 선정
+                priority_doc_ids = {s["doc_id"] for s in scored if s["similarity"] >= 0.01}
 
-        # 2단계: 청크 검색 (기존 하이브리드 검색)
-        all_results = vector_store.search(query=data.message, n_results=10)
+            # 2단계: 청크 검색 (기존 하이브리드 검색)
+            all_results = vector_store.search(query=data.message, n_results=10)
 
-        if all_results and priority_doc_ids:
-            # 우선 문서의 청크를 앞에, 나머지를 뒤에 배치
-            priority_results = [r for r in all_results if r["doc_id"] in priority_doc_ids]
-            other_results = [r for r in all_results if r["doc_id"] not in priority_doc_ids]
-            results = (priority_results + other_results)[:7]
-        else:
-            results = all_results[:5]
+            if all_results and priority_doc_ids:
+                # 우선 문서의 청크를 앞에, 나머지를 뒤에 배치
+                priority_results = [r for r in all_results if r["doc_id"] in priority_doc_ids]
+                other_results = [r for r in all_results if r["doc_id"] not in priority_doc_ids]
+                results = (priority_results + other_results)[:7]
+            else:
+                results = all_results[:5]
 
-        if results:
-            # 우선 문서에는 요약도 함께 컨텍스트에 추가
-            summary_context_parts = []
-            if priority_doc_ids:
-                summary_map = {d.id: d for d in docs_with_summary}
-                added_summaries = set()
+            if results:
+                # 우선 문서에는 요약도 함께 컨텍스트에 추가
+                summary_context_parts = []
+                if priority_doc_ids:
+                    summary_map = {d.id: d for d in docs_with_summary}
+                    added_summaries = set()
+                    for r in results:
+                        did = r["doc_id"]
+                        if did in priority_doc_ids and did not in added_summaries and did in summary_map:
+                            doc = summary_map[did]
+                            summary_context_parts.append(
+                                f"[문서 '{doc.filename}' 요약]\n{doc.summary}"
+                            )
+                            added_summaries.add(did)
+
+                chunk_parts = [r["content"] for r in results]
+                rag_context = "\n\n---\n\n".join(summary_context_parts + chunk_parts)
+
+                # 참조 문서 정보 수집
+                all_doc_ids = list(set(r["doc_id"] for r in results))
+                doc_name_result = await db.execute(
+                    select(KnowledgeDocument).where(KnowledgeDocument.id.in_(all_doc_ids))
+                )
+                doc_map = {d.id: d.filename for d in doc_name_result.scalars().all()}
+                seen = set()
                 for r in results:
                     did = r["doc_id"]
-                    if did in priority_doc_ids and did not in added_summaries and did in summary_map:
-                        doc = summary_map[did]
-                        summary_context_parts.append(
-                            f"[문서 '{doc.filename}' 요약]\n{doc.summary}"
-                        )
-                        added_summaries.add(did)
+                    if did not in seen and did in doc_map:
+                        seen.add(did)
+                        is_priority = did in priority_doc_ids
+                        rag_references.append({
+                            "filename": doc_map[did],
+                            "score": round(r["score"], 3),
+                            "matched_summary": is_priority,
+                        })
+        except Exception:
+            pass
 
-            chunk_parts = [r["content"] for r in results]
-            rag_context = "\n\n---\n\n".join(summary_context_parts + chunk_parts)
-
-            # 참조 문서 정보 수집
-            all_doc_ids = list(set(r["doc_id"] for r in results))
-            doc_name_result = await db.execute(
-                select(KnowledgeDocument).where(KnowledgeDocument.id.in_(all_doc_ids))
-            )
-            doc_map = {d.id: d.filename for d in doc_name_result.scalars().all()}
-            seen = set()
-            for r in results:
-                did = r["doc_id"]
-                if did not in seen and did in doc_map:
-                    seen.add(did)
-                    is_priority = did in priority_doc_ids
-                    rag_references.append({
-                        "filename": doc_map[did],
-                        "score": round(r["score"], 3),
-                        "matched_summary": is_priority,
-                    })
-    except Exception:
-        pass
+    if render_rca_report:
+        observability, reasoning = rca_report_context
+        messages = build_report_prompt_from_reasoning(observability, reasoning)
 
     # 대화별 첨부파일 컨텍스트
     attachment_context = ""
-    if conv.attachments:
+    if conv.attachments and not render_rca_report:
         context_parts = []
         for att in conv.attachments:
             context_parts.append(f"[첨부파일: {att.filename}]\n{att.content_text[:8000]}")
@@ -228,14 +256,14 @@ async def chat(
 
     # 시스템 프롬프트 구성
     system_parts = []
-    if conv.system_prompt:
+    if conv.system_prompt and not render_rca_report:
         system_parts.append(_format_system_prompt(conv.system_prompt))
-    if rag_context:
+    if rag_context and not render_rca_report:
         system_parts.append(
             "다음은 지식 저장소에서 검색된 관련 문서 내용입니다."
             "문서 요약이 포함된 경우 해당 문서의 내용을 특히 우선적으로 참고하여 답변하세요.\n\n" + rag_context
         )
-    if attachment_context:
+    if attachment_context and not render_rca_report:
         system_parts.append(
             "다음은 사용자가 이 대화에 첨부한 문서 내용입니다.\n\n" + attachment_context
         )
@@ -245,23 +273,24 @@ async def chat(
     #         "단순한 대화라면 바로 답변하세요.\n"
     #         "답변은 항상 한국어로 진행합니다."
     #     )
-    if system_parts:
+    if system_parts and not render_rca_report:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
-    history_started = False
-    for m in conv.messages:
-        if not history_started and m.role != "user":
-            system_parts.append(
-                "다음은 이 대화에 이미 표시된 assistant RCA 요약입니다.\n\n" + m.content
-            )
-            if messages and messages[0]["role"] == "system":
-                messages[0]["content"] = "\n\n".join(system_parts)
-            else:
-                messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
-            continue
-        history_started = True
-        messages.append({"role": m.role, "content": m.content})
-    messages.append({"role": "user", "content": data.message})
+    if not render_rca_report:
+        history_started = False
+        for m in conv.messages:
+            if not history_started and m.role != "user":
+                system_parts.append(
+                    "다음은 이 대화에 이미 표시된 assistant RCA 요약입니다.\n\n" + m.content
+                )
+                if messages and messages[0]["role"] == "system":
+                    messages[0]["content"] = "\n\n".join(system_parts)
+                else:
+                    messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
+                continue
+            history_started = True
+            messages.append({"role": m.role, "content": m.content})
+        messages.append({"role": "user", "content": data.message})
 
     async def generate():
         response_parts: list[str] = []
@@ -286,7 +315,11 @@ async def chat(
                         loop_messages.append({"role": "system", "content": _agent_loop_instruction(iteration, step_plan)})
                         call_messages = loop_messages
                     llm_payload = {"model": conv.model, "messages": call_messages, "stream": True}
-                    prompt_label = f"Iteration {iteration + 1}" if data.agent_mode else "Chat"
+                    prompt_label = (
+                        "RCA Report Rendering Prompt"
+                        if render_rca_report
+                        else (f"Iteration {iteration + 1}" if data.agent_mode else "Chat")
+                    )
                     llm_call_index += 1
                     yield prompt_debug_event(llm_call_index, prompt_label, llm_payload)
                     async with client.stream(

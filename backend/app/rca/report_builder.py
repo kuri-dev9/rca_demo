@@ -116,6 +116,328 @@ def build_semantic_summary(analysis: RcaAnalysis) -> dict[str, Any]:
     }
 
 
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _critical_enb(enb_baseline: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    def sort_key(row: dict[str, Any]) -> tuple[float, float]:
+        return (_num(row.get("anomaly_ratio")), _num(row.get("failures")))
+
+    out = []
+    for row in sorted(enb_baseline, key=sort_key, reverse=True)[:limit]:
+        out.append({
+            "enb_id": row.get("enb_id"),
+            "attempts": row.get("attempts"),
+            "success": row.get("success"),
+            "failures": row.get("failures"),
+            "failure_rate": row.get("failure_rate"),
+            "anomaly_ratio": row.get("anomaly_ratio"),
+        })
+    return out
+
+
+def _imsi_behavior_summary(observability: dict[str, Any]) -> list[dict[str, Any]]:
+    stats_by_imsi = {
+        row.get("imsi_prefix"): row
+        for row in observability.get("top_failed_imsi", [])
+        if row.get("imsi_prefix")
+    }
+
+    summary = []
+    for item in observability.get("imsi_timelines", []):
+        imsi_prefix = item.get("imsi_prefix", "")
+        stats = stats_by_imsi.get(imsi_prefix, {})
+        stages: set[str] = set()
+        causes: set[str] = set()
+        enbs: set[str] = set()
+        mmes: set[str] = set()
+        failure_events = 0
+
+        for event in item.get("timeline", []):
+            if event.get("type") != "FAILURE":
+                continue
+            failure_events += 1
+            if event.get("stage"):
+                stages.add(str(event["stage"]))
+            if event.get("cause"):
+                causes.add(str(event["cause"]))
+            if event.get("enb"):
+                enbs.add(str(event["enb"]))
+            if event.get("mme"):
+                mmes.add(str(event["mme"]))
+
+        summary.append({
+            "imsi_prefix": imsi_prefix,
+            "failure_count": stats.get("failures", failure_events),
+            "success_count": stats.get("success", 0),
+            "same_cause": len(causes) == 1 if failure_events else False,
+            "same_stage": len(stages) == 1 if failure_events else False,
+            "multi_enb": len(enbs) > 1,
+            "multi_mme": len(mmes) > 1,
+        })
+    return summary
+
+
+def _imsi_behavior_summary_from_sequences(sequences: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary = []
+    for seq in sequences:
+        stages: set[str] = set()
+        causes: set[str] = set()
+        enbs: set[str] = set()
+        mmes: set[str] = set()
+        failure_events = 0
+
+        for event in seq.get("events", []):
+            if event.get("type") != "FAILURE":
+                continue
+            failure_events += 1
+            if event.get("stage"):
+                stages.add(str(event["stage"]))
+            if event.get("cause"):
+                causes.add(str(event["cause"]))
+            if event.get("enb"):
+                enbs.add(str(event["enb"]))
+            if event.get("mme"):
+                mmes.add(str(event["mme"]))
+
+        summary.append({
+            "imsi_prefix": seq.get("imsi", ""),
+            "failure_count": seq.get("failures", failure_events),
+            "success_count": seq.get("success", 0),
+            "same_cause": len(causes) == 1 if failure_events else False,
+            "same_stage": len(stages) == 1 if failure_events else False,
+            "multi_enb": len(enbs) > 1,
+            "multi_mme": len(mmes) > 1,
+        })
+    return summary
+
+
+def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    shared = sorted(rows, key=lambda row: _num(row.get("count")), reverse=True)[:limit]
+    return [
+        {
+            "interface": row.get("interface"),
+            "stage": row.get("stage"),
+            "cause": row.get("cause"),
+            "count": row.get("count"),
+            "affected_imsi_count": row.get("affected_imsi_count"),
+            "affected_mme_count": row.get("affected_mme_count"),
+            "affected_enb_count": row.get("affected_enb_count"),
+        }
+        for row in shared
+    ]
+
+
+def _compact_mme(rows: list[dict[str, Any]], limit: int = 2) -> list[dict[str, Any]]:
+    out = []
+    sorted_rows = sorted(rows, key=lambda row: _num(row.get("anomaly_ratio")), reverse=True)[:limit]
+    for row in sorted_rows:
+        out.append({
+            "mme_id": row.get("mme_id"),
+            "attempts": row.get("attempts"),
+            "success": row.get("success"),
+            "failures": row.get("failures"),
+            "failure_rate": row.get("failure_rate"),
+            "anomaly_ratio": row.get("anomaly_ratio"),
+        })
+    return out
+
+
+def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
+    """Compact RCA IR used by the LLM reasoning path."""
+    stage_counter: Counter[str] = Counter()
+    for chain in analysis.failure_chains:
+        stage_counter[chain.failure_point] += 1
+
+    rep_chains = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for chain in analysis.failure_chains:
+        item = {
+            "procedure": chain.procedure,
+            "interface": chain.failure_interface,
+            "failure_point": chain.failure_point,
+            "cause": chain.failure_cause_name,
+        }
+        key = (item["procedure"], item["interface"], item["failure_point"], item["cause"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rep_chains.append(item)
+        if len(rep_chains) >= 10:
+            break
+
+    return {
+        "statistics": {
+            "attempt_count": analysis.attempt_count,
+            "success_count": analysis.success_count,
+            "failure_count": analysis.failure_count,
+            "failure_rate": round(analysis.failure_rate, 2),
+        },
+        "interface_failure_distribution": dict(analysis.interface_distribution),
+        "failure_stage_distribution": dict(stage_counter),
+        "representative_chains": rep_chains,
+        "mme_baseline": _compact_mme(analysis.mme_baseline),
+        "critical_enb": _critical_enb(analysis.enb_baseline),
+        "shared_failure_observations": _compact_shared_failures(analysis.shared_failure_signatures),
+        "imsi_behavior_summary": _imsi_behavior_summary_from_sequences(analysis.top_failed_imsi_sequences),
+        "burst_detected": bool(analysis.burst_detected),
+    }
+
+
+def build_compact_reasoning_json(observability: dict[str, Any]) -> dict[str, Any]:
+    """
+    LLM causal reasoning 전용 compact payload.
+    Full observability는 보존하되 reasoning 호출에는 raw timeline/긴 chain/APN/timestamp를 전달하지 않는다.
+    """
+    stats = observability.get("statistics", {})
+    rep_chains = []
+    for chain in observability.get("representative_chains", [])[:10]:
+        rep_chains.append({
+            "procedure": chain.get("procedure"),
+            "interface": chain.get("interface"),
+            "failure_point": chain.get("failure_point"),
+            "cause": chain.get("cause"),
+        })
+
+    shared = sorted(
+        observability.get("shared_failure_observations", []),
+        key=lambda row: _num(row.get("count")),
+        reverse=True,
+    )[:10]
+    shared = [
+        {
+            "interface": row.get("interface"),
+            "stage": row.get("stage"),
+            "cause": row.get("cause"),
+            "count": row.get("count"),
+            "affected_imsi_count": row.get("affected_imsi_count"),
+            "affected_mme_count": row.get("affected_mme_count"),
+            "affected_enb_count": row.get("affected_enb_count"),
+        }
+        for row in shared
+    ]
+
+    burst = observability.get("burst", {})
+    mme_baseline = [
+        {
+            "mme_id": row.get("mme_id"),
+            "attempts": row.get("attempts"),
+            "success": row.get("success"),
+            "failures": row.get("failures"),
+            "failure_rate": row.get("failure_rate"),
+            "anomaly_ratio": row.get("anomaly_ratio"),
+        }
+        for row in observability.get("mme_baseline", [])
+    ]
+
+    return {
+        "statistics": {
+            "attempt_count": stats.get("attempt_count"),
+            "success_count": stats.get("success_count"),
+            "failure_count": stats.get("failure_count"),
+            "failure_rate": stats.get("failure_rate"),
+        },
+        "interface_failure_distribution": observability.get("interface_failure_distribution", {}),
+        "failure_stage_distribution": observability.get("failure_stage_distribution", {}),
+        "representative_chains": rep_chains,
+        "mme_baseline": mme_baseline,
+        "critical_enb": _critical_enb(observability.get("enb_baseline", [])),
+        "shared_failure_observations": shared,
+        "imsi_behavior_summary": _imsi_behavior_summary(observability),
+        "burst_detected": bool(burst.get("detected", False)),
+    }
+
+
+def build_reasoning_prompt(observability: dict[str, Any]) -> str:
+    ctx_json = json.dumps(observability, ensure_ascii=False, indent=2)
+    return f"""\
+당신은 LTE/EPC RCA reasoning engine입니다.
+
+목표는 운영 보고서 작성이 아니라 원인 판단입니다.
+제공된 데이터만 사용하세요.
+
+수행할 작업:
+- network-side / subscriber-side 판단
+- 주요 원인 분석
+- 반복 failure pattern 분석
+- anomaly correlation 분석
+- confidence 산출
+- 추가 필요 데이터 제시
+
+절대 금지:
+- markdown
+- HTML
+- recommendation
+- operator summary
+- 입력 데이터에 없는 값 생성
+
+응답 형식:
+- 자연스러운 한국어 문장으로만 작성
+- 핵심 내용만 간결하게 작성
+
+[Compact RCA IR]
+{ctx_json}
+"""
+
+
+def build_reasoning_messages(observability: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an LTE/EPC RCA reasoning engine.\n\n"
+                "Your role is causal reasoning only.\n\n"
+                "Do not generate reports.\n"
+                "Do not generate markdown.\n"
+                "Do not generate tables.\n"
+                "Do not generate HTML.\n\n"
+                "Use ONLY the provided Compact RCA IR.\n\n"
+                "Never invent missing values.\n\n"
+                "Never infer APN-related conclusions.\n\n"
+                "Keep the response concise and operationally focused."
+            ),
+        },
+        {"role": "user", "content": build_reasoning_prompt(observability)},
+    ]
+
+
+def build_report_prompt_from_reasoning(
+    compact_rca_ir: dict[str, Any],
+    reasoning: Any,
+) -> list[dict[str, str]]:
+    ir_json = json.dumps(compact_rca_ir, ensure_ascii=False, indent=2)
+    reasoning_text = json.dumps(reasoning, ensure_ascii=False, indent=2) if not isinstance(reasoning, str) else reasoning
+    system = (
+        "당신은 LTE/EPC 운영 보고서 작성자입니다. "
+        "새로운 RCA 판단을 하지 말고, 제공된 데이터와 reasoning 결과를 운영자용 markdown report로 렌더링만 하세요. "
+        "reasoning 결과를 변경하거나 보강하지 마세요."
+    )
+    user = f"""\
+아래 Compact RCA IR과 LLM reasoning 결과만 기반으로 운영자용 markdown report를 작성하세요.
+
+중요:
+- 새로운 원인 판단 금지
+- reasoning 결과를 그대로 반영
+- Compact RCA IR과 reasoning 결과에 없는 장비/IMSI/원인/통계 생성 금지
+- 원본 xDR 또는 추가 분석 데이터가 없다고 가정하고, reasoning 결과를 포맷팅만 수행
+- markdown table 사용
+
+[Compact RCA IR]
+{ir_json}
+
+[LLM reasoning result]
+{reasoning_text}
+"""
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def build_rca_messages(summary: dict[str, Any]) -> list[dict[str, str]]:
     """
     RCA LLM 호출용 messages (system + user).

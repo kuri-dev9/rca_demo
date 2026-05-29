@@ -23,6 +23,7 @@ import {
   uploadXdrFile,
   analyzeSampleXdr,
   streamRcaReport,
+  streamRcaReasoning,
 } from './api';
 import './App.css';
 
@@ -192,6 +193,7 @@ function App() {
     rcaFileInputRef.current?.click();
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const startRcaReport = (convId: number) => {
     setStreaming(true);
     setStreamingContent('');
@@ -252,6 +254,66 @@ function App() {
     abortRef.current = controller;
   };
 
+  const startRcaReasoning = (convId: number) => {
+    setStreaming(true);
+    setStreamingContent('');
+    setThinkingContent('');
+    resetStreamingDebugPrompts();
+
+    const controller = streamRcaReasoning(
+      convId,
+      (token) => {
+        if (activeConvIdRef.current !== convId) return;
+        setStreamingContent((prev) => prev + token);
+      },
+      () => {
+        const promptSnapshot = [...streamingDebugPromptsRef.current];
+        setStreamingContent((prev) => {
+          if (prev || promptSnapshot.length > 0) {
+            const assistantMsg: Message = {
+              id: Date.now() + 1,
+              conversation_id: convId,
+              role: 'assistant',
+              content: prev || '*(응답 없음)*',
+              created_at: new Date().toISOString(),
+              debug_prompts: promptSnapshot,
+            };
+            setMessages((msgs) => [...msgs, assistantMsg]);
+          }
+          return '';
+        });
+        setStreaming(false);
+        setThinkingContent('');
+        resetStreamingDebugPrompts();
+        abortRef.current = null;
+      },
+      (err) => {
+        const promptSnapshot = [...streamingDebugPromptsRef.current];
+        if (promptSnapshot.length > 0) {
+          const assistantMsg: Message = {
+            id: Date.now() + 1,
+            conversation_id: convId,
+            role: 'assistant',
+            content: `*(RCA reasoning 오류: ${err})*`,
+            created_at: new Date().toISOString(),
+            debug_prompts: promptSnapshot,
+          };
+          setMessages((msgs) => [...msgs, assistantMsg]);
+        }
+        setStreamingContent('');
+        setThinkingContent('');
+        setStreaming(false);
+        resetStreamingDebugPrompts();
+        abortRef.current = null;
+        alert(`RCA reasoning 오류: ${err}`);
+      },
+      (prompt) => {
+        appendStreamingDebugPrompt(prompt);
+      }
+    );
+    abortRef.current = controller;
+  };
+
   const showRcaResult = async (result: any, userContent: string) => {
     const convId = result.conversation_id;
     setActiveConvId(convId);
@@ -278,7 +340,7 @@ function App() {
       },
     ]);
     await loadConversations();
-    startRcaReport(convId);
+    startRcaReasoning(convId);
   };
 
   const handleRcaFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {

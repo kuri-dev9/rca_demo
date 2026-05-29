@@ -265,6 +265,59 @@ export function streamRcaReport(
   return controller;
 }
 
+export function streamRcaReasoning(
+  convId: number,
+  onToken: (token: string) => void,
+  onDone: () => void,
+  onError: (err: string) => void,
+  onPromptDebug?: (prompt: PromptDebug) => void,
+): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${API_BASE}/rca/conversations/${convId}/reasoning`, {
+    signal: controller.signal,
+  }).then(async (response) => {
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: 'RCA reasoning 실패' }));
+      onError(err.detail || 'RCA reasoning 실패');
+      return;
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      onError('응답 스트림을 열 수 없습니다');
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.token) onToken(data.token);
+            if (data.done) onDone();
+            if (data.error) onError(data.error);
+            if (data.prompt_debug) onPromptDebug?.(data.prompt_debug);
+          } catch {}
+        }
+      }
+    }
+  }).catch((err) => {
+    if (err.name !== 'AbortError') onError(err.message);
+  });
+
+  return controller;
+}
+
 // ── Chat ─────────────────────────────────────────────────────────────────────
 
 export function streamChat(

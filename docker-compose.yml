@@ -10,7 +10,7 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
-      - "3306:3306"
+      - "18002:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-Mobigen_1234}"]
       interval: 10s
@@ -29,7 +29,7 @@ services:
       - knowledge_data:/app/knowledge_data
       - ./docs/data:/app/docs/data:ro
     ports:
-      - "8000:8000"
+      - "18001:8000"
     depends_on:
       mysql:
         condition: service_healthy
@@ -42,7 +42,7 @@ services:
     container_name: rca_frontend
     restart: unless-stopped
     ports:
-      - "3100:3100"
+      - "18000:18000"
     depends_on:
       - backend
 

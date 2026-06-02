@@ -96,7 +96,6 @@ def _subscriber_pattern_rows(analysis: RcaAnalysis) -> list[dict[str, Any]]:
         failures = int(seq.get("failures") or 0)
         rows.append({
             "imsi_prefix": seq.get("imsi", ""),
-            "plmn": seq.get("plmn", ""),
             "stage": seq.get("stage", ""),
             "cause": seq.get("cause", ""),
             "attempts": attempts,
@@ -117,13 +116,12 @@ def _append_subscriber_pattern_section(lines: list[str], rows: list[dict[str, An
     lines += [
         " ",
         "### Subscriber Failure Pattern Summary",
-        "| IMSI | PLMN | Stage | Cause | Attempts | Failures | IMSI Failure Rate | Total Failure Share | MME Count | eNB Count | Zero Success |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| IMSI | Stage | Cause | Attempts | Failures | IMSI Failure Rate | Total Failure Share | MME Count | eNB Count | Zero Success |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         lines.append(
-            f"| {row.get('imsi_prefix')} | {row.get('plmn') or '-'} "
-            f"| {row.get('stage') or '-'} | {row.get('cause') or '-'} "
+            f"| {row.get('imsi_prefix')} | {row.get('stage') or '-'} | {row.get('cause') or '-'} "
             f"| {row.get('attempts', 0):,} | {row.get('failures', 0):,} "
             f"| {row.get('imsi_failure_rate', 0.0)}% | {row.get('total_failure_share', 0.0)}% "
             f"| {row.get('mme_count', 0):,} "
@@ -131,38 +129,42 @@ def _append_subscriber_pattern_section(lines: list[str], rows: list[dict[str, An
         )
 
 
+def _build_subscriber_summary_rows(analysis: RcaAnalysis) -> list[str]:
+    summary = analysis.subscriber_mobility_summary or {}
+    affected = int(summary.get("affected_imsi_count") or len(analysis.affected_imsi_set))
+    repeated = int(summary.get("repeated_failure_imsi_count") or 0)
+    top_share = max(
+        (float(row.get("total_failure_share") or 0.0) for row in _subscriber_pattern_rows(analysis)),
+        default=0.0,
+    )
+    return [
+        f"Affected IMSI: {affected:,}",
+        f"Single Failure IMSI: {int(summary.get('single_failure_imsi_count') or 0):,}",
+        f"Repeated Failure IMSI: {repeated:,} ({_pct(repeated, affected)})",
+        f"Multi MME IMSI: {int(summary.get('multi_mme_imsi_count') or 0):,}",
+        f"Multi eNB IMSI: {int(summary.get('multi_enb_imsi_count') or 0):,}",
+        f"Zero Success IMSI: {int(summary.get('zero_success_imsi_count') or 0):,}",
+        f"Top IMSI Failure Share: {round(top_share, 1)}%",
+    ]
+
+
+def _append_subscriber_summary_section(lines: list[str], analysis: RcaAnalysis) -> None:
+    rows = _build_subscriber_summary_rows(analysis)
+    if not rows:
+        return
+    lines += [
+        " ",
+        "### Subscriber Summary",
+    ]
+    for row in rows:
+        lines.append(f"- {row}")
+
+
 def _pct(value: int, total: int) -> str:
     return f"{round(value / total * 100, 1)}%" if total else "0.0%"
 
 
 def _append_subscriber_statistics_sections(lines: list[str], analysis: RcaAnalysis) -> None:
-    if analysis.subscriber_cause_distribution:
-        lines += [
-            " ",
-            "### Subscriber Cause Distribution",
-            "| Cause | Failures | Failure Ratio | IMSI Count | PLMN Count |",
-            "|---|---:|---:|---:|---:|",
-        ]
-        for row in analysis.subscriber_cause_distribution:
-            lines.append(
-                f"| {row.get('cause') or '-'} | {row.get('failures', 0):,} "
-                f"| {row.get('failure_ratio', 0.0)}% | {row.get('imsi_count', 0):,} "
-                f"| {row.get('plmn_count', 0):,} |"
-            )
-
-    if analysis.subscriber_plmn_distribution:
-        lines += [
-            " ",
-            "### Subscriber PLMN Distribution",
-            "| PLMN | IMSI Count | Failures | Top Cause |",
-            "|---|---:|---:|---|",
-        ]
-        for row in analysis.subscriber_plmn_distribution:
-            lines.append(
-                f"| {row.get('plmn') or '-'} | {row.get('imsi_count', 0):,} "
-                f"| {row.get('failures', 0):,} | {row.get('top_cause') or '-'} |"
-            )
-
     summary = analysis.subscriber_mobility_summary or {}
     affected = int(summary.get("affected_imsi_count") or len(analysis.affected_imsi_set))
     if affected:
@@ -228,8 +230,7 @@ def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
     _append_entity_contribution_section(lines, "eNB Failure Contribution", entity_contrib.get("enb", []))
     _append_entity_contribution_section(lines, "SGW Failure Contribution", entity_contrib.get("sgw", []))
 
-    _append_subscriber_pattern_section(lines, _subscriber_pattern_rows(analysis))
-    _append_subscriber_statistics_sections(lines, analysis)
+    _append_subscriber_summary_section(lines, analysis)
 
     # Shared Failure Observations
     if analysis.shared_failure_signatures:
@@ -316,6 +317,11 @@ async def _analyze_file_path(
         logger.debug("rca memory after_analysis rss_mb=%.1f", _rss_mb())
 
         compact_rca_ir = build_compact_rca_ir(analysis)
+        if loop_mode:
+            # Preserve the current loop-mode input shape while the one-shot RCA path
+            # uses aggregate-only subscriber_summary.
+            compact_rca_ir["subscriber_failure_patterns"] = _subscriber_pattern_rows(analysis)
+            compact_rca_ir["subscriber_mobility_summary"] = analysis.subscriber_mobility_summary
         conv = Conversation(
             title=f"RCA: {filename}",
             model=model or RCA_MODEL,
@@ -495,7 +501,7 @@ async def stream_rca_reasoning(
     else:
         # Legacy conversations may still have the old full observability payload.
         compact_rca_ir = build_compact_reasoning_json(context if isinstance(context, dict) else {})
-    messages = build_reasoning_messages(compact_rca_ir)
+    messages = build_rca_messages({"compact_rca_ir": compact_rca_ir})
 
     async def generate():
         response_parts: list[str] = []
@@ -511,7 +517,7 @@ async def stream_rca_reasoning(
                         else messages
                     )
                     logical_step = loop_step_labels[step_index] if loop_mode else ""
-                    label = f"RCA Loop {logical_step}" if loop_mode else "RCA Reasoning Prompt"
+                    label = f"RCA Loop {logical_step}" if loop_mode else "RCA LLM Prompt"
                     if loop_mode:
                         try:
                             marker_text = f"[{logical_step} 입력]\n"

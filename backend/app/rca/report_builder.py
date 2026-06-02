@@ -86,7 +86,6 @@ def _subscriber_failure_patterns_from_sequences(sequences: list[dict[str, Any]])
         failures = int(seq.get("failures") or 0)
         patterns.append({
             "imsi_prefix": seq.get("imsi", ""),
-            "plmn": seq.get("plmn", ""),
             "attempts": attempts,
             "failures": failures,
             "imsi_failure_rate": float(seq.get("imsi_failure_rate") or 0.0),
@@ -98,6 +97,29 @@ def _subscriber_failure_patterns_from_sequences(sequences: list[dict[str, Any]])
             "enb_count": int(seq.get("enb_count") or 0),
         })
     return patterns
+
+
+def _build_subscriber_summary(
+    compact_patterns: list[dict[str, Any]],
+    mobility_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    summary = mobility_summary or {}
+    affected = int(summary.get("affected_imsi_count") or 0)
+    repeated = int(summary.get("repeated_failure_imsi_count") or 0)
+    top_failure_share = max(
+        (_num(row.get("total_failure_share")) for row in compact_patterns),
+        default=0.0,
+    )
+    return {
+        "affected_imsi_count": affected,
+        "single_failure_imsi_count": int(summary.get("single_failure_imsi_count") or 0),
+        "repeated_failure_imsi_count": repeated,
+        "repeated_failure_ratio": round(repeated / affected * 100, 1) if affected else 0.0,
+        "multi_mme_imsi_count": int(summary.get("multi_mme_imsi_count") or 0),
+        "multi_enb_imsi_count": int(summary.get("multi_enb_imsi_count") or 0),
+        "zero_success_imsi_count": int(summary.get("zero_success_imsi_count") or 0),
+        "top_imsi_failure_share": round(top_failure_share, 1),
+    }
 
 
 def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
@@ -163,10 +185,13 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             "top_sgw": analysis.entity_failure_contributions.get("sgw", []),
         },
         "shared_failure_observations": _compact_shared_failures(analysis.shared_failure_signatures),
-        "subscriber_failure_patterns": subscriber_patterns,
-        "subscriber_cause_distribution": analysis.subscriber_cause_distribution,
-        "subscriber_plmn_distribution": analysis.subscriber_plmn_distribution,
-        "subscriber_mobility_summary": analysis.subscriber_mobility_summary,
+        # Legacy comparison payload. Keep the generation code above for future A/B tests,
+        # but do not send per-IMSI rows to the one-shot RCA path.
+        # "subscriber_failure_patterns": subscriber_patterns,
+        "subscriber_summary": _build_subscriber_summary(
+            subscriber_patterns,
+            analysis.subscriber_mobility_summary,
+        ),
         "burst_detected": bool(analysis.burst_detected),
     }
 
@@ -250,6 +275,13 @@ def build_reasoning_prompt(observability: dict[str, Any]) -> str:
 - anomaly correlation 분석
 - confidence 산출
 - 추가 필요 데이터 제시
+
+Subscriber 판단 규칙:
+- 개별 IMSI 사례보다 전체 가입자 분포를 우선하세요.
+- repeated_failure_ratio가 낮으면 subscriber 집중 현상으로 해석하지 마세요.
+- top_imsi_failure_share 단독으로 subscriber-side를 판단하지 마세요.
+- affected_imsi_count 대비 repeated_failure_imsi_count 비율을 우선 고려하세요.
+- multi_mme_imsi_count, multi_enb_imsi_count는 보조 증거로만 사용하세요.
 
 절대 금지:
 - markdown
@@ -602,210 +634,144 @@ def build_rca_messages(summary: dict[str, Any]) -> list[dict[str, str]]:
     RCA LLM 호출용 messages (system + user).
     LLM이 RCA 판단/보고서를 직접 생성한다.
     """
+    observation = summary.get("compact_rca_ir", summary) if isinstance(summary, dict) else summary
+    if isinstance(observation, dict):
+        observation = {
+            k: v
+            for k, v in observation.items()
+            if k not in {"subscriber_cause_distribution", "subscriber_plmn_distribution"}
+        }
     system = """\
 당신은 LTE/EPC 네트워크 RCA 분석 전문가입니다.
 
-제공된 xDR 관측 데이터(statistics, baseline, representative failure chain,
-shared failure observation, IMSI timeline)를 기반으로
-운영자 관점의 RCA 분석 결과를 작성하세요.
+반드시 입력 데이터만 사용합니다.
+반드시 한국어로 결과를 작성합니다.
 
-========================
-[핵심 원칙]
-========================
+절대 금지:
+- 입력에 없는 장비 생성
+- 입력에 없는 IMSI 생성
+- 입력에 없는 Cause 생성
+- 입력에 없는 Interface 생성
+- 입력에 없는 Stage 생성
+- 입력에 없는 PLMN 생성
+- Cause / Interface / Stage 이름 변경
+- 대응조치 생성
+- 운영 권고 생성
+- 최적화 제안 생성
+- Vendor 문의 제안 생성
 
-1. 입력 데이터 우선
-- 제공된 관측 데이터를 기반으로 분석하세요.
-- 입력 데이터에 없는 값을 새로 생성하지 마세요.
-- 숫자 재계산 최소화.
-- attempts/success/failures/failure_rate/anomaly_ratio 값은 입력값 그대로 사용하세요.
+다음 내용은 입력 데이터에 명시되어 있지 않으면 추론하지 않습니다:
+- 무선 품질 문제
+- 커버리지 문제
+- 간섭
+- DRX
+- 장비 버그
+- Software Issue
+- Hardware Issue
+- HSS 문제
+- Backhaul 문제
+- Vendor 문제
+- Resource 문제
 
-2. Hallucination 최소화
-다음 내용은 입력 데이터 근거가 있을 때만 작성:
-- recovery pattern
-- retry pattern
-- intermittent failure
-- vendor issue
-- resource issue
-- software update
-- optimization
-- tuning
-- escalation
+값 보존 예:
+- UE_not_responding 은 그대로 사용
+- VENDOR_SPECIFIC_CAUSE_15001 은 그대로 사용
+- S11_GTPv2C 는 그대로 사용
 
-근거가 부족하면 아래 표현만 사용하세요:
-- 판단 불가
-- 추가 데이터 필요
-- 가능성 존재
+RCA 판단 시 가장 중요하게 사용할 데이터:
+1. Entity Failure Contribution
+2. Shared Failure Observations
+3. Interface Failure Distribution
+4. Failure Stage Distribution
+5. Representative Chains
+6. Subscriber Summary
 
-3. RCA 판단 기준
-다음 관측값을 우선 활용:
-- anomaly_ratio
-- failure_rate
-- shared_failure_observations
-- representative_chains
-- interface/stage 분포
-- IMSI timeline
+Network-side 우세 조건:
+- 특정 MME/eNB에 Failure 집중
+- 높은 Failure Contribution
+- 동일 Interface/Stage/Cause 조합 반복
+- Shared Failure Observation 반복
+- affected_imsi_count 큼
+- affected_mme_count 큼
+- affected_enb_count 큼
 
-4. 장비 vs 가입자 판단 규칙
+Subscriber-side 우세 조건:
+- 전체 가입자 중 반복 실패 가입자 비율이 높음
+- 상위 IMSI의 Total Failure Share가 높음
+- Multi-MME IMSI 비율이 높음
+- Multi-eNB IMSI 비율이 높음
+- Zero Success IMSI가 Subscriber Summary 내에서 의미 있게 집중됨
 
-다음 조건을 기반으로 network-side / subscriber-side를 판단하세요.
-단일 지표만으로 확정하지 마세요
+주의:
+- 개별 IMSI 사례보다 전체 가입자 분포를 우선합니다.
+- repeated_failure_ratio가 낮으면 subscriber 집중 현상으로 해석하지 않습니다.
+- top_imsi_failure_share 단독으로 subscriber-side를 판단하지 않습니다.
+- affected_imsi_count 대비 repeated_failure_imsi_count 비율을 우선 고려합니다.
+- multi_mme_imsi_count, multi_enb_imsi_count는 보조 증거로만 사용합니다.
 
-[network-side 가능성 증가 조건]
-- 동일 interface/stage/cause가 다수 IMSI에서 반복되면 network-side 가능성 증가
-- affected_imsi_count가 큼
-- 특정 eNB에서 success=0이면 장비 이상 가능성 증가
-- 특정 eNB에 failure 집중
-- 동일 cause가 여러 가입자에 공통 발생
+판단 우선순위:
+1. Failure Contribution
+2. Shared Failure Observation
+3. Interface Distribution
+4. Stage Distribution
+5. Repeated Failure Ratio
+6. Top IMSI Failure Share
+7. Multi-MME IMSI
+8. Multi-eNB IMSI
 
-[subscriber-side 가능성 증가 조건]
-- 특정 IMSI만 지속 실패
-- 특정 stage/cause가 단일 가입자 중심으로 반복
+최종 RCA는 반드시 아래 중 하나만 사용:
+- Network-side Dominant
+- Subscriber-side Dominant
+- Mixed
+- Unknown
 
-5. APN은 보조 정보
-- APN 기반 결론 금지
+신뢰도는 반드시 아래 중 하나만 사용:
+- High
+- Medium
+- Low
 
-6. Generic 운영 문구 금지
-다음 문장 생성 금지:
+필요 시 아래 항목만 작성합니다:
+- 우선 점검 장비
+- 우선 점검 Interface
+- 우선 점검 IMSI
+- 추가 확인 필요 데이터
 
-- software update 필요
-- optimization 필요
-- tuning 필요
-- vendor issue 가능성
-- resource issue 가능성
-- escalation 필요
-- 추가 분석 필요
+Markdown을 사용하고, HTML은 사용하지 않습니다."""
 
-대신 실제 필요한 추가 데이터 항목을 구체적으로 작성하세요.
-
-좋은 예:
-- S1AP reject trace 필요
-- eNB sector KPI 필요
-- UE capability 정보 필요
-- RRC Reject counter 필요
-- Attach Reject 상세 cause 필요
-
-========================
-[출력 규칙]
-========================
-1. Markdown 사용
-2. 주요 분석은 markdown table syntax를 사용
-3. 설명은 짧고 명확하게 작성
-4. 입력 데이터에 없는 예시값 생성 금지
-5. HTML 태그 사용 금지"""
-
-    ctx_json = json.dumps(summary, ensure_ascii=False, indent=2)
+    ctx_json = json.dumps(observation, ensure_ascii=False, indent=2)
     user = f"""\
-다음 xDR 관측 데이터를 분석하여 RCA 보고서를 한국어로 작성해주세요.
+다음 xDR 관측 데이터를 분석하여 RCA 판단 결과를 한국어로 작성하세요.
 
 [관측 데이터]
 {ctx_json}
 
 [출력 형식]
 
-# 1. Interface / Stage 분석
+## 최종 RCA
 
-## Interface Failure 분포
-
-| Interface | Failures |
+| 항목 | 값 |
 |---|---|
+| 판단 | Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나 |
+| 신뢰도 | High / Medium / Low 중 하나 |
 
-## Failure Stage 분포
+## 판단 근거
 
-| Stage | Failures |
-|---|---|
+### Network-side 근거
+- 입력 데이터의 Entity Failure Contribution / Shared Failure Observations / Interface / Stage 기반 근거만 작성
 
-========================
+### Subscriber-side 근거
+- 입력 데이터의 Subscriber Summary 기반 근거만 작성
 
-# 2. 장비 분석
+### 반대 근거 또는 제한 사항
+- 판단을 약하게 만드는 입력 데이터 기반 근거만 작성
 
-## MME
+## 우선 확인 대상
 
-| MME | Attempts | Success | Failures | Failure Rate | Anomaly Ratio | 분석 |
-|---|---|---|---|---|---|---|
-
-분석 기준:
-- anomaly_ratio 높음 여부
-- failure_rate 비교
-- 특정 MME 집중 여부
-
-## eNB
-
-| eNB | Attempts | Success | Failures | Failure Rate | Anomaly Ratio | 분석 |
-|---|---|---|---|---|---|---|
-
-분석 기준:
-- success=0 여부
-- anomaly_ratio 높음 여부
-- failure 집중 여부
-
-========================
-
-# 3. Representative Failure Chain 분석
-
-아래 형식 사용:
-
-- [절차명]
-  - Interface:
-  - Failure Point:
-  - Cause:
-  - Chain:
-    - IMSI: IMSI_PREFIX1
-      - EVENT1 → EVENT2 → EVENT3 ...
-    - IMSI: IMSI_PREFIX2
-      - EVENT1 → EVENT2 → EVENT3 ...
-
-========================
-
-# 4. 실패 통계
-
-| Interface | Stage | Cause | Count | IMSI | MME | eNB | 해석 |
-|---|---|---|---|---|---|---|---|
-
-해석 기준:
-- 동일 cause가 다수 IMSI 반복
-- 특정 eNB 집중 여부
-- 여러 eNB 분산 여부
-- network-side 가능성
-- subscriber-side 가능성
-
-단, 입력 데이터 근거 없이 단정 금지.
-
-========================
-
-# 5. IMSI Timeline 분석
-
-| IMSI | 특징 | 해석 |
-|---|---|---|
-
-가능한 분석:
-- 동일 IMSI 반복 실패
-- 여러 장비 이동 중 동일 실패
-- 성공 이벤트 없음
-- 특정 stage 고정 실패
-- 특정 interface 반복 실패
-
-입력 데이터에 없는 패턴 생성 금지.
-
-========================
-
-# 6. 최종 RCA 판단
-
-| 항목 | 판단 |
-|---|---|
-| 주요 성격 | |
-| 주요 근거 | |
-| Network-side 가능성 | |
-| Subscriber-side 가능성 | |
-| 추가 필요 데이터 | |
-
-최종 결론은 반드시 아래 중 하나만 사용:
-- network-side 우세
-- subscriber-side 우세
-- 혼합형
-- 판단 불가
-
-"추가 분석 필요" 문장 금지.
-대신 필요한 데이터 항목을 구체적으로 작성하세요."""
+- 우선 점검 장비:
+- 우선 점검 Interface:
+- 우선 점검 IMSI:
+- 추가 확인 필요 데이터:
+"""
 
     return [
         {"role": "system", "content": system},

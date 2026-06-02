@@ -370,6 +370,9 @@ STEP 2. 가입자 증거
 
 목표:
 가입자 관련 데이터를 정렬하여 관찰 결과만 추출한다.
+전체 실패 건수 대비 IMSI의 Total Failure Share를 우선 평가한다.
+IMSI Failure Rate는 보조 지표로 사용한다.
+IMSI Failure Rate가 100%라도 Total Failure Share가 낮으면 가입자 집중도는 낮게 평가한다.
 
 절대 하지 말 것:
 
@@ -413,11 +416,6 @@ STEP 2. 가입자 증거
 
 - ...
 
-## PLMN Distribution
-
-- PLMN:
-- Failures:
-
 [STEP 2 입력]
 {payload}
 """
@@ -437,10 +435,16 @@ STEP1, STEP2 내용을 반복 출력하지 않는다.
 2. Interface Concentration
 3. Stage Concentration
 4. Total Failure Share
-5. IMSI Failure Rate
-6. Repeated Failure IMSI
-7. Multi-MME IMSI
-8. Multi-eNB IMSI
+5. Repeated Failure IMSI
+6. Multi-MME IMSI
+7. Multi-eNB IMSI
+8. IMSI Failure Rate
+
+판단 규칙:
+- IMSI Failure Rate가 100%여도 Total Failure Share가 낮으면 Subscriber-side 근거를 약하게 본다.
+- 특정 IMSI의 Failure Rate보다 전체 실패 중 차지하는 비중인 Total Failure Share를 우선한다.
+- 예: IMSI Failure Rate = 100%, Total Failure Share = 7.9% 는 가입자 집중도 낮음.
+- 예: IMSI Failure Rate = 100%, Total Failure Share = 45% 는 가입자 집중도 높음.
 
 출력:
 
@@ -506,17 +510,39 @@ def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, 
 
 
 def build_loop_step2_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
+    patterns = sorted(
+        compact_rca_ir.get("subscriber_failure_patterns", []),
+        key=lambda row: _num(row.get("total_failure_share")),
+        reverse=True,
+    )[:5]
+    compact_patterns = [
+        {
+            "imsi_prefix": row.get("imsi_prefix", ""),
+            "attempts": row.get("attempts", 0),
+            "failures": row.get("failures", 0),
+            "imsi_failure_rate": row.get("imsi_failure_rate", 0.0),
+            "total_failure_share": row.get("total_failure_share", 0.0),
+            "mme_count": row.get("mme_count", 0),
+            "enb_count": row.get("enb_count", 0),
+            "zero_success": row.get("zero_success", False),
+        }
+        for row in patterns
+    ]
     payload = {
-        "subscriber_failure_patterns": compact_rca_ir.get("subscriber_failure_patterns", []),
-        "subscriber_cause_distribution": compact_rca_ir.get("subscriber_cause_distribution", []),
-        "subscriber_plmn_distribution": compact_rca_ir.get("subscriber_plmn_distribution", []),
+        "statistics": compact_rca_ir.get("statistics", {}),
+        "subscriber_failure_patterns": compact_patterns,
         "subscriber_mobility_summary": compact_rca_ir.get("subscriber_mobility_summary", {}),
     }
     return build_loop_step_messages("step2", payload)
 
 
-def build_loop_step3_messages(network_evidence: str, subscriber_evidence: str) -> list[dict[str, str]]:
+def build_loop_step3_messages(
+    compact_rca_ir: dict[str, Any],
+    network_evidence: str,
+    subscriber_evidence: str,
+) -> list[dict[str, str]]:
     payload = {
+        "statistics": compact_rca_ir.get("statistics", {}),
         "network_evidence": network_evidence,
         "subscriber_evidence": subscriber_evidence,
     }
@@ -530,8 +556,9 @@ def build_loop_reasoning_steps(compact_rca_ir: dict[str, Any], previous_results:
     if step_index == 1:
         return build_loop_step2_messages(compact_rca_ir)
     if step_index == 2:
-        return build_loop_step3_messages(previous_results[0], previous_results[1])
+        return build_loop_step3_messages(compact_rca_ir, previous_results[0], previous_results[1])
     return build_loop_step3_messages(
+        compact_rca_ir,
         previous_results[0] if previous_results else "",
         previous_results[1] if len(previous_results) > 1 else "",
     )

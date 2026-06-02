@@ -289,32 +289,30 @@ def build_reasoning_messages(observability: dict[str, Any]) -> list[dict[str, st
 
 
 STEP_SYSTEM_PROMPT = """
-입력 데이터만 사용한다.
+당신의 역할은 RCA 분석가가 아니다.
 
-금지:
-- 입력에 없는 값 생성
-- Cause 의미 해석
-- Interface 의미 해석
-- Vendor Cause 의미 추정
-- Stage 의미 추정
+당신의 역할은 입력 데이터를 정렬하고 관찰 결과를 추출하는 것이다.
 
-다음 값은 그대로 사용한다:
-- Interface
-- Stage
-- Cause
-- Entity
-- Failure Contribution
-- IMSI
-- PLMN
+중요:
+- 입력에 없는 값 생성 금지
+- 숫자 계산 금지
+- 비율 계산 금지
+- 원인 추론 금지
+- 의미 해석 금지
+- Cause 이름 변경 금지
+- Interface 이름 변경 금지
+- Stage 이름 변경 금지
 
-예시:
-- UE_not_responding → 그대로 사용
-- VENDOR_SPECIFIC_CAUSE_15001 → 그대로 사용
-- S11_GTPv2C → 그대로 사용
+반드시 입력값 그대로 사용한다.
 
-출력은 한국어 Markdown만 사용한다.
+예:
+UE_not_responding -> UE_not_responding
+VENDOR_SPECIFIC_CAUSE_15001 -> VENDOR_SPECIFIC_CAUSE_15001
+S11_GTPv2C -> S11_GTPv2C
 
-최종 RCA 판단은 STEP3에서만 수행한다.
+STEP1, STEP2에서는 설명하지 말고 관찰 결과만 작성한다.
+
+최종 판단은 STEP3에서만 수행한다.
 """
 
 
@@ -322,32 +320,46 @@ STEP1_TEMPLATE = """
 STEP 1. 네트워크 증거
 
 목표:
-- 장비 관점 증거 수집
-- RCA 판단 금지
-- Subscriber 분석 금지
+네트워크 관련 데이터를 정렬하여 관찰 결과만 추출한다.
 
-분석 대상:
-- Failure Contribution
-- Interface Distribution
-- Stage Distribution
-- Shared Failure Observation
+절대 하지 말 것:
+- 원인 추론
+- 의미 해석
+- RCA 판단
+- 대응조치 작성
+- 가입자 언급
 
-허용:
-- 상위 장비 정렬
-- 집중도 분석
-- 반복 패턴 분석
+수행:
+1. Failure Contribution 상위 장비 출력
+2. Failure Count 상위 Cause 출력
+3. Failure Count 상위 Interface 출력
+4. Failure Count 상위 Stage 출력
+5. 동일 Cause가 여러 장비에서 반복되는 경우만 기록
 
-출력:
+출력 형식:
+## Top Devices
 
-## Failure Contribution 집중 장비
+- Entity:
+- Failure Contribution:
 
-## Top Cause 집중도
+## Top Causes
 
-## Stage / Interface 집중도
+- Cause:
+- Count:
 
-## 장비 편중 여부
+## Top Interfaces
 
-## 장비 관점 패턴
+- Interface:
+- Count:
+
+## Top Stages
+
+- Stage:
+- Count:
+
+## Repeated Device Patterns
+
+- ...
 
 [STEP 1 입력]
 {payload}
@@ -357,75 +369,75 @@ STEP2_TEMPLATE = """
 STEP 2. 가입자 증거
 
 목표:
-- 가입자 관점 증거 수집
-- RCA 판단 금지
-- Network-side 판단 금지
+가입자 관련 데이터를 정렬하여 관찰 결과만 추출한다.
+
+절대 하지 말 것:
+
+- 원인 추론
+- 이동성 문제 추정
+- Network-side 판단
+- RCA 판단
+- 대응조치 작성
 
 우선순위:
-1. Repeated Failure IMSI
-2. Multi-MME IMSI
-3. Multi-eNB IMSI
-4. Zero Success IMSI
-5. IMSI Failure Rate
-6. Total Failure Share
 
-분석 대상:
-- IMSI Failure Rate
-- Total Failure Share
-- Cause Distribution
-- PLMN Distribution
-- Repeated Failure IMSI
-- Multi-MME IMSI
-- Multi-eNB IMSI
-- Zero Success IMSI
+1. Total Failure Share
+2. IMSI Failure Rate
+3. Repeated Failure IMSI
+4. Multi-MME IMSI
+5. Multi-eNB IMSI
+6. Zero Success IMSI
 
-출력:
+출력 형식:
 
-## IMSI 집중도
+## Top IMSI
 
-## PLMN 집중도
+- IMSI:
+- Failures:
+- IMSI Failure Rate:
+- Total Failure Share:
 
-## Cause 집중도
+## Repeated Failure IMSI
 
-## Repeated Failure Evidence
+- ...
 
-## Mobility Evidence
+## Multi-MME IMSI
 
-## Zero Success Evidence
+- ...
+
+## Multi-eNB IMSI
+
+- ...
+
+## Zero Success IMSI
+
+- ...
+
+## PLMN Distribution
+
+- PLMN:
+- Failures:
 
 [STEP 2 입력]
 {payload}
-
----
-PLMN Failure Count 자체는 RCA 판단 근거로 사용하지 않는다.
-PLMN은 분포 확인 용도로만 사용한다.
-IMSI Failure Rate와 Total Failure Share를 우선한다.
 """
 
 STEP3_TEMPLATE = """
 STEP 3. 최종 RCA
 
-목표:
-- STEP1 네트워크 증거와 STEP2 가입자 증거만 사용
-- 새로운 분석 생성 금지
-- 새로운 근거 생성 금지
+STEP1과 STEP2 결과만 사용한다.
 
-판단:
-- Network-side Dominant
-- Subscriber-side Dominant
-
-Mixed 사용 조건:
-- Network-side와 Subscriber-side 증거가 모두 강하고
-- 우선 점검 대상을 하나로 정할 수 없는 경우만 허용
-
-Unknown 사용 금지
+새로운 분석 금지.
+새로운 데이터 생성 금지.
+STEP1, STEP2 내용을 반복 출력하지 않는다.
 
 판단 우선순위:
+
 1. Device Concentration
 2. Interface Concentration
 3. Stage Concentration
-4. IMSI Failure Rate
-5. Total Failure Share
+4. Total Failure Share
+5. IMSI Failure Rate
 6. Repeated Failure IMSI
 7. Multi-MME IMSI
 8. Multi-eNB IMSI
@@ -434,25 +446,34 @@ Unknown 사용 금지
 
 ## 판단
 
+Network-side Dominant
+또는
+Subscriber-side Dominant
+
 ## 신뢰도
 
-## 우선 점검 대상
-- MME
-- eNB
-- IMSI
+High
+Medium
+Low
 
-## 근거
-- Device Concentration
-- Interface Concentration
-- Stage Concentration
-- IMSI Failure Rate
-- Total Failure Share
-- Mobility Evidence
+## 우선 점검 대상
+
+MME:
+eNB:
+IMSI:
+
+## 판단 근거
+
+- Device:
+- Interface:
+- Stage:
+- IMSI:
 
 ## 대응조치
-- 즉시 확인할 장비
-- 즉시 확인할 Procedure
-- 즉시 확인할 가입자
+
+- 즉시 확인 장비:
+- 즉시 확인 인터페이스:
+- 즉시 확인 가입자:
 
 [STEP 3 입력]
 {payload}

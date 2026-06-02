@@ -16,6 +16,7 @@ from app.rca.spec_loader import FIELD_INDEX
 # 파싱에 필요한 필드 목록 (이름 → FIELD_INDEX 기반 index)
 _NEEDED: dict[str, int] = {
     "imsi":                    FIELD_INDEX["imsi"],
+    "imsi_mcc_mnc_info":       FIELD_INDEX["imsi_mcc_mnc_info"],
     "mme_id":                  FIELD_INDEX["mme_id"],
     "first_enb_id":            FIELD_INDEX["first_enb_id"],
     "call_type":               FIELD_INDEX["call_type"],
@@ -46,13 +47,14 @@ _NEEDED: dict[str, int] = {
     "last_error_cause":        FIELD_INDEX["last_error_cause"],
 }
 
-_STRING_FIELDS = {"imsi", "first_enb_id", "apn"}
+_STRING_FIELDS = {"imsi", "imsi_mcc_mnc_info", "first_enb_id", "apn"}
 _FLOAT_FIELDS = {"call_start_time"}
 _TOTAL_COLUMNS = max(154, max(FIELD_INDEX.values()) + 1)
 
 @dataclass
 class XdrRecord:
     imsi: str
+    imsi_mcc_mnc_info: str
     mme_id: int
     first_enb_id: str
     call_type: int

@@ -40,6 +40,7 @@ function App() {
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [rcaLoading, setRcaLoading] = useState(false);
+  const [rcaLoopMode, setRcaLoopMode] = useState(false);
   const [streamingDebugPrompts, setStreamingDebugPrompts] = useState<PromptDebug[]>([]);
   const rcaFileInputRef = useRef<HTMLInputElement>(null);
   const [currentSystemPrompt, setCurrentSystemPrompt] = useState('');
@@ -349,7 +350,7 @@ function App() {
     e.target.value = '';
     setRcaLoading(true);
     try {
-      const result = await uploadXdrFile(file, selectedModel);
+      const result = await uploadXdrFile(file, selectedModel, rcaLoopMode);
       await showRcaResult(result, `xDR 파일 RCA 분석: ${file.name}`);
       setRcaLoading(false);
     } catch (err: any) {
@@ -362,7 +363,7 @@ function App() {
     if (rcaLoading || streaming) return;
     setRcaLoading(true);
     try {
-      const result = await analyzeSampleXdr(selectedModel);
+      const result = await analyzeSampleXdr(selectedModel, rcaLoopMode);
       await showRcaResult(result, 'xDR 샘플 RCA 분석');
       setRcaLoading(false);
     } catch (err: any) {
@@ -562,6 +563,15 @@ function App() {
             >
               {rcaLoading ? '분석 중...' : 'RCA 분석'}
             </button>
+            <label className="agent-mode-toggle" title="RCA 단계별 reasoning pipeline">
+              <input
+                type="checkbox"
+                checked={rcaLoopMode}
+                onChange={(e) => setRcaLoopMode(e.target.checked)}
+                disabled={rcaLoading || streaming}
+              />
+              RCA Loop Mode
+            </label>
             <button
               className="knowledge-btn"
               onClick={handleSampleRca}

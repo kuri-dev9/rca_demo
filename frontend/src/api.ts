@@ -183,10 +183,11 @@ export interface RcaResult {
   assistant_message: string;
 }
 
-export async function uploadXdrFile(file: File, model: string): Promise<RcaResult> {
+export async function uploadXdrFile(file: File, model: string, loopMode = false): Promise<RcaResult> {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('model', model);
+  formData.append('loop_mode', String(loopMode));
   const res = await fetch(`${API_BASE}/rca/analyze`, {
     method: 'POST',
     body: formData,
@@ -198,9 +199,10 @@ export async function uploadXdrFile(file: File, model: string): Promise<RcaResul
   return res.json();
 }
 
-export async function analyzeSampleXdr(model: string): Promise<RcaResult> {
+export async function analyzeSampleXdr(model: string, loopMode = false): Promise<RcaResult> {
   const formData = new FormData();
   formData.append('model', model);
+  formData.append('loop_mode', String(loopMode));
   const res = await fetch(`${API_BASE}/v1/analysis/sample`, {
     method: 'POST',
     body: formData,

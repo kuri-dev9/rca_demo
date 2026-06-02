@@ -125,7 +125,7 @@ def _num(value: Any, default: float = 0.0) -> float:
 
 def _critical_enb(enb_baseline: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
     def sort_key(row: dict[str, Any]) -> tuple[float, float]:
-        return (_num(row.get("anomaly_ratio")), _num(row.get("failures")))
+        return (_num(row.get("failures")), _num(row.get("failure_rate")))
 
     out = []
     for row in sorted(enb_baseline, key=sort_key, reverse=True)[:limit]:
@@ -135,7 +135,6 @@ def _critical_enb(enb_baseline: list[dict[str, Any]], limit: int = 10) -> list[d
             "success": row.get("success"),
             "failures": row.get("failures"),
             "failure_rate": row.get("failure_rate"),
-            "anomaly_ratio": row.get("anomaly_ratio"),
         })
     return out
 
@@ -185,35 +184,105 @@ def _imsi_behavior_summary(observability: dict[str, Any]) -> list[dict[str, Any]
 def _imsi_behavior_summary_from_sequences(sequences: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary = []
     for seq in sequences:
-        stages: set[str] = set()
-        causes: set[str] = set()
-        enbs: set[str] = set()
-        mmes: set[str] = set()
-        failure_events = 0
-
-        for event in seq.get("events", []):
-            if event.get("type") != "FAILURE":
-                continue
-            failure_events += 1
-            if event.get("stage"):
-                stages.add(str(event["stage"]))
-            if event.get("cause"):
-                causes.add(str(event["cause"]))
-            if event.get("enb"):
-                enbs.add(str(event["enb"]))
-            if event.get("mme"):
-                mmes.add(str(event["mme"]))
-
         summary.append({
             "imsi_prefix": seq.get("imsi", ""),
-            "failure_count": seq.get("failures", failure_events),
-            "success_count": seq.get("success", 0),
-            "same_cause": len(causes) == 1 if failure_events else False,
-            "same_stage": len(stages) == 1 if failure_events else False,
-            "multi_enb": len(enbs) > 1,
-            "multi_mme": len(mmes) > 1,
+            "attempts": seq.get("attempts", 0),
+            "failures": seq.get("failures", 0),
+            "imsi_failure_rate": seq.get("imsi_failure_rate", 0.0),
+            "total_failure_share": seq.get("total_failure_share", 0.0),
+            "same_cause_ratio": seq.get("same_cause_ratio", 0.0),
+            "same_stage_ratio": seq.get("same_stage_ratio", 0.0),
+            "multi_mme": bool(seq.get("multi_mme", False)),
+            "multi_enb": bool(seq.get("multi_enb", False)),
+            "zero_success": int(seq.get("success") or 0) == 0,
         })
     return summary
+
+
+def _subscriber_failure_patterns_from_sequences(sequences: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    patterns = []
+    for seq in sequences:
+        attempts = int(seq.get("attempts") or 0)
+        failures = int(seq.get("failures") or 0)
+        patterns.append({
+            "imsi_prefix": seq.get("imsi", ""),
+            "plmn": seq.get("plmn", ""),
+            "attempts": attempts,
+            "failures": failures,
+            "imsi_failure_rate": float(seq.get("imsi_failure_rate") or 0.0),
+            "total_failure_share": float(seq.get("total_failure_share") or 0.0),
+            "zero_success": int(seq.get("success") or 0) == 0,
+            "stage": seq.get("stage", ""),
+            "cause": seq.get("cause", ""),
+            "mme_count": int(seq.get("mme_count") or 0),
+            "enb_count": int(seq.get("enb_count") or 0),
+        })
+    return patterns
+
+
+def _subscriber_cause_distribution(patterns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in patterns:
+        cause = str(row.get("cause") or "UNKNOWN")
+        item = grouped.setdefault(cause, {
+            "cause": cause,
+            "failures": 0,
+            "_imsis": set(),
+            "_plmns": set(),
+        })
+        item["failures"] += int(row.get("failures") or 0)
+        if row.get("imsi_prefix"):
+            item["_imsis"].add(str(row["imsi_prefix"]))
+        if row.get("plmn"):
+            item["_plmns"].add(str(row["plmn"]))
+    out = []
+    for item in grouped.values():
+        out.append({
+            "cause": item["cause"],
+            "failures": item["failures"],
+            "imsi_count": len(item["_imsis"]),
+            "plmn_count": len(item["_plmns"]),
+        })
+    return sorted(out, key=lambda item: item["failures"], reverse=True)
+
+
+def _subscriber_plmn_distribution(patterns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in patterns:
+        plmn = str(row.get("plmn") or "UNKNOWN")
+        cause = str(row.get("cause") or "UNKNOWN")
+        failures = int(row.get("failures") or 0)
+        item = grouped.setdefault(plmn, {
+            "plmn": plmn,
+            "failures": 0,
+            "_imsis": set(),
+            "_causes": Counter(),
+        })
+        item["failures"] += failures
+        if row.get("imsi_prefix"):
+            item["_imsis"].add(str(row["imsi_prefix"]))
+        item["_causes"][cause] += failures
+    out = []
+    for item in grouped.values():
+        top_cause = item["_causes"].most_common(1)[0][0] if item["_causes"] else ""
+        out.append({
+            "plmn": item["plmn"],
+            "imsi_count": len(item["_imsis"]),
+            "failures": item["failures"],
+            "top_cause": top_cause,
+        })
+    return sorted(out, key=lambda item: item["failures"], reverse=True)
+
+
+def _subscriber_mobility_summary(patterns: list[dict[str, Any]], affected_imsi_count: int) -> dict[str, int]:
+    return {
+        "affected_imsi_count": affected_imsi_count,
+        "single_failure_imsi_count": sum(1 for row in patterns if int(row.get("failures") or 0) == 1),
+        "repeated_failure_imsi_count": sum(1 for row in patterns if int(row.get("failures") or 0) > 1),
+        "multi_mme_imsi_count": sum(1 for row in patterns if int(row.get("mme_count") or 0) > 1),
+        "multi_enb_imsi_count": sum(1 for row in patterns if int(row.get("enb_count") or 0) > 1),
+        "zero_success_imsi_count": sum(1 for row in patterns if bool(row.get("zero_success"))),
+    }
 
 
 def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
@@ -234,7 +303,7 @@ def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> lis
 
 def _compact_mme(rows: list[dict[str, Any]], limit: int = 2) -> list[dict[str, Any]]:
     out = []
-    sorted_rows = sorted(rows, key=lambda row: _num(row.get("anomaly_ratio")), reverse=True)[:limit]
+    sorted_rows = sorted(rows, key=lambda row: _num(row.get("failures")), reverse=True)[:limit]
     for row in sorted_rows:
         out.append({
             "mme_id": row.get("mme_id"),
@@ -242,7 +311,6 @@ def _compact_mme(rows: list[dict[str, Any]], limit: int = 2) -> list[dict[str, A
             "success": row.get("success"),
             "failures": row.get("failures"),
             "failure_rate": row.get("failure_rate"),
-            "anomaly_ratio": row.get("anomaly_ratio"),
         })
     return out
 
@@ -269,7 +337,15 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
         rep_chains.append(item)
         if len(rep_chains) >= 10:
             break
-
+    for seq in analysis.top_failed_imsi_sequences:
+        attempts = _num(seq.get("attempts"))
+        failures = _num(seq.get("failures"))
+        seq["imsi_failure_rate"] = round(failures / attempts * 100, 1) if attempts else 0.0
+        seq["total_failure_share"] = (
+            round(failures / analysis.failure_count * 100, 1)
+            if analysis.failure_count else 0.0
+        )
+    subscriber_patterns = _subscriber_failure_patterns_from_sequences(analysis.top_failed_imsi_sequences)
     return {
         "statistics": {
             "attempt_count": analysis.attempt_count,
@@ -280,10 +356,16 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
         "interface_failure_distribution": dict(analysis.interface_distribution),
         "failure_stage_distribution": dict(stage_counter),
         "representative_chains": rep_chains,
-        "mme_baseline": _compact_mme(analysis.mme_baseline),
-        "critical_enb": _critical_enb(analysis.enb_baseline),
+        "entity_failure_contribution": {
+            "top_mme": analysis.entity_failure_contributions.get("mme", []),
+            "top_enb": analysis.entity_failure_contributions.get("enb", []),
+            "top_sgw": analysis.entity_failure_contributions.get("sgw", []),
+        },
         "shared_failure_observations": _compact_shared_failures(analysis.shared_failure_signatures),
-        "imsi_behavior_summary": _imsi_behavior_summary_from_sequences(analysis.top_failed_imsi_sequences),
+        "subscriber_failure_patterns": subscriber_patterns,
+        "subscriber_cause_distribution": analysis.subscriber_cause_distribution,
+        "subscriber_plmn_distribution": analysis.subscriber_plmn_distribution,
+        "subscriber_mobility_summary": analysis.subscriber_mobility_summary,
         "burst_detected": bool(analysis.burst_detected),
     }
 
@@ -389,20 +471,361 @@ def build_reasoning_messages(observability: dict[str, Any]) -> list[dict[str, st
         {
             "role": "system",
             "content": (
-                "You are an LTE/EPC RCA reasoning engine.\n\n"
-                "Your role is causal reasoning only.\n\n"
-                "Do not generate reports.\n"
-                "Do not generate markdown.\n"
-                "Do not generate tables.\n"
-                "Do not generate HTML.\n\n"
-                "Use ONLY the provided Compact RCA IR.\n\n"
-                "Never invent missing values.\n\n"
-                "Never infer APN-related conclusions.\n\n"
-                "Keep the response concise and operationally focused."
+                "당신은 LTE/EPC RCA 원인 분석 엔진입니다.\n"
+                "당신의 역할은 원인 추론(reasoning)만 수행하는 것입니다.\n"
+                "레포트를 생성하지 마세요.\n"
+                "markdown을 생성하지 마세요.\n"
+                "table을 생성하지 마세요.\n"
+                "HTML을 생성하지 마세요.\n"
+                "반드시 제공된 데이터만 사용하세요.\n"
+                "누락된 값을 임의로 생성하지 마세요.\n"
+                "APN 관련 결론을 추론하지 마세요.\n"
+                "응답은 간결하고 운영 분석 중심으로 작성하세요."
             ),
         },
         {"role": "user", "content": build_reasoning_prompt(observability)},
     ]
+
+
+STEP_SYSTEM_PROMPT = """당신은 LTE/EPC RCA 단계 분석 엔진이다.
+입력 데이터만 사용하고, 없는 값/장비/IMSI/Cause를 만들지 않는다.
+IMSI는 입력 문자열 그대로 사용하며, prefix 기준 grouping/aggregation을 하지 않는다.
+APN/Trend/시간 기반 추론은 생성하지 않는다.
+한국어 Markdown만 출력하고 JSON/HTML/영어 제목은 출력하지 않는다.
+최종 Root Cause 확정은 최종 RCA 단계에서만 수행한다.
+Failure Contribution은 재계산하지 않고 입력값을 그대로 사용한다. 입력에 없으면 N/A로 출력한다.
+대응조치는 Final RCA 단계에서 RCA 이후 Action Item으로 분리된 경우만 허용한다.
+금지 문구: 위치 기반 신호 문제, 통신 장애로 보임, 추가 분석 필요, 모니터링 필요, 최적화 필요.
+"""
+
+
+STEP1_TEMPLATE = """STEP 1. 네트워크 신호 추출
+
+목표:
+- 장비별 실패 신호와 주요 실패 패턴만 정리
+- 입력의 entity_id를 그대로 제목에 사용
+- 입력의 top_mme/top_enb/top_sgw 항목을 모두 출력
+- 어떤 장비에서 어떤 interface/stage/cause가 몇 건 관찰됐는지만 출력
+- Root Cause/통신 문제/위치 기반 신호/추가 분석 언급 금지
+
+출력 형식:
+## 네트워크 신호
+
+### MME 47
+| Interface | Stage | Cause | Count |
+|---|---|---|---:|
+
+### eNB bo3reaGROYftluYm2HmjZQ==
+| Interface | Stage | Cause | Count |
+|---|---|---|---:|
+
+---
+
+[STEP 1 입력]
+{payload}
+"""
+
+
+STEP2_TEMPLATE = """STEP 1. 네트워크 증거
+
+목표:
+- 장비 관점의 사실 기반 증거 수집만 수행
+- Observability Summary의 MME/eNB/SGW Failure Contribution과 유형별 실패 통계를 기반으로 Evidence 생성
+- Failure Contribution 집중 장비, Interface 집중도, Stage 집중도, Cause 집중도, MME/eNB 편중도, 반복 발생 패턴 분석
+- 단순 데이터 재출력 금지
+- Fact 기반 관찰만 작성
+- RCA 판단 금지
+- Root Cause 추정 금지
+- Network-side / Subscriber-side 결론 금지
+- 대응방안 금지
+- 원인 추정 금지
+- 입력의 entity_id를 그대로 제목에 사용
+- Failure Contribution은 입력값 그대로 사용하고, 입력에 없으면 N/A
+
+출력 형식:
+## 네트워크 증거
+
+### Failure Contribution 집중 장비
+- ...
+
+### Top Cause 집중도
+- ...
+
+### Stage / Interface 집중도
+- ...
+
+### 장비 편중 여부
+- ...
+
+### 장비 관점 패턴
+- ...
+
+---
+
+[STEP 1 입력]
+{payload}
+"""
+
+
+STEP3_TEMPLATE = """STEP 3. 가입자 신호 추출
+
+목표:
+- PLMN별 Failure Signal 생성
+- PLMN별 IMSI 수, Failure 수, Top Cause 정리
+- Repeated Failure / Multi MME / Multi eNB / Zero Success 신호 정리
+- Representative IMSI는 입력에 제공된 최대 3개만 출력
+- RCA/Root Cause/Network-side/Subscriber-side 판단 금지
+
+출력 형식:
+## 가입자 신호
+
+### PLMN별 Failure Signal
+| PLMN | IMSI Count | Failures | Top Cause |
+|---|---:|---:|---|
+
+### Subscriber Cause Signal
+| Cause | Failures | Failure Ratio | IMSI Count | PLMN Count |
+|---|---:|---:|---:|---:|
+
+### Mobility Signal
+- Affected IMSI:
+- Repeated Failure IMSI:
+- Multi MME IMSI:
+- Multi eNB IMSI:
+- Zero Success IMSI:
+
+### Representative IMSI
+| IMSI | PLMN | Stage | Cause | Attempts | Failures | IMSI Failure Rate | Total Failure Share | MME Count | eNB Count | Zero Success |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---|
+
+---
+
+[STEP 3 입력]
+{payload}
+"""
+
+
+STEP4_TEMPLATE = """STEP 2. 가입자 증거
+
+목표:
+- 가입자 관점의 사실 기반 증거 수집만 수행
+- Observability Summary의 Subscriber 통계를 기반으로 Evidence 생성
+- Cause 집중도, PLMN 집중도, Repeated Failure IMSI, Multi-MME IMSI, Multi-eNB IMSI, Zero Success IMSI, Representative IMSI 분석
+- Representative IMSI에서는 IMSI Failure Rate와 Total Failure Share를 구분하여 사용
+- 우선순위: Repeated Failure IMSI, Multi-MME IMSI, Multi-eNB IMSI, Zero Success IMSI, Cause Distribution, PLMN Distribution
+- 단순 통계 재출력 금지
+- Fact 기반 관찰만 작성
+- RCA 판단 금지
+- Root Cause 추정 금지
+- Network-side / Subscriber-side 결론 금지
+- 대응방안 금지
+- 원인 추정 금지
+
+출력 형식:
+## 가입자 증거
+
+### IMSI 집중도
+- ...
+
+### PLMN 집중도
+- ...
+
+### Cause 집중도
+- ...
+
+### Repeated Failure / Mobility Evidence
+- ...
+
+### Zero Success Evidence
+- ...
+
+---
+
+[STEP 2 입력]
+{payload}
+"""
+
+
+STEP5_TEMPLATE = """STEP 3. 상관관계 분석
+
+목표:
+- Step1 네트워크 증거와 Step2 가입자 증거를 비교
+- Cause overlap, PLMN concentration, Device concentration, Repeated IMSI ratio, Multi-MME ratio, Multi-eNB ratio, Zero Success ratio, Stage overlap, Interface overlap 분석
+- 장비 집중도, PLMN 집중도, IMSI Total Failure Share, IMSI Failure Rate, Repeated Failure, Multi-MME/eNB, Zero Success 패턴을 모두 활용
+- Cause는 참고 지표일 뿐 최종 판단 근거로 사용하지 않음
+- 단순 Cause 이름 비교 금지
+- 최종 RCA 판단 금지
+- 대응조치 금지
+- Root Cause 확정 금지
+- 증거 정리만 수행
+
+출력 형식:
+## 상관관계 분석
+
+### Network-side Evidence
+- ...
+
+### Subscriber-side Evidence
+- ...
+
+### Mixed Evidence
+- ...
+
+### Contradicting Evidence
+- ...
+
+---
+
+[STEP 3 입력]
+{payload}
+"""
+
+
+STEP6_TEMPLATE = """STEP 4. 최종 RCA
+
+목표:
+- Step3 Correlation 결과만 근거로 최종 RCA 판단
+- Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나 선택
+- 새로운 근거 생성 금지
+- 새로운 분석 생성 금지
+- Step3에 없는 장비/가입자/Cause/통계 생성 금지
+- Cause 이름만으로 판단 금지
+- UE_not_responding / Unable_to_page_UE / Network_failure 등은 증상으로 취급하고 Root Cause로 확정하지 않음
+- Step3 증거만 재사용하여 최종 판단과 신뢰도 작성
+- 대응조치는 RCA 이후 Action Item으로 Root Cause 근거와 분리하여 작성
+
+판단 우선순위:
+1. Device Concentration
+2. Interface Concentration
+3. Stage Concentration
+4. IMSI Total Failure Share
+5. IMSI Failure Rate
+6. Repeated Failure IMSI Ratio
+7. Multi-MME IMSI Ratio
+8. Multi-eNB IMSI Ratio
+
+판단 기준:
+- Network-side Dominant: 특정 MME/eNB Failure Contribution, Interface 집중, Stage 집중이 강하고 상위 IMSI Total Failure Share와 Repeated/Multi-MME/Multi-eNB 비율이 낮은 경우
+- Subscriber-side Dominant: 특정 IMSI의 IMSI Failure Rate와 Total Failure Share가 높고 여러 MME/eNB에서 반복 실패하며 Device/Interface/Stage 집중도가 약한 경우
+- Mixed: Network-side 근거와 Subscriber-side 근거가 모두 강한 경우만 사용
+- Unknown: Step3 증거만으로 우선 점검 대상을 정하기 어려운 경우
+- 같은 Cause가 양쪽에 보인다는 이유만으로 Mixed 판단 금지
+
+출력 형식:
+# 최종 RCA
+
+## 판단
+Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나
+
+## 우선 점검 대상
+- Step3 증거에 등장한 MME/eNB/IMSI/PLMN만 작성
+
+## 신뢰도
+High / Medium / Low 중 하나
+
+## 근거 요약
+- Step3의 Network-side Evidence / Subscriber-side Evidence / Mixed Evidence / Contradicting Evidence만 재사용
+
+## 대응 방향
+- 판단 유형에 맞는 RCA 이후 Action Item만 작성
+- Network-side Dominant: 우선 점검 대상 MME/eNB 로그 확인, 집중 Interface/Stage trace 확인, 관련 Interface Counter 확인, paging/session counter 확인
+- Subscriber-side Dominant: Total Failure Share가 높은 IMSI 우선 확인, 해당 IMSI의 MME/eNB 이동 경로 확인, SIM/subscription/profile 상태 확인, 동일 IMSI 반복 실패 확인
+- Mixed: Network-side 우선 점검 대상과 Subscriber-side 우선 점검 대상을 분리해서 작성
+- Unknown: 부족한 데이터 항목을 구체적으로 작성하고 generic한 추가 분석 문장만 단독 출력하지 않음
+
+## 요약
+3줄 이내로 작성
+
+
+---
+
+[STEP 4 입력]
+{payload}
+"""
+
+
+LOOP_STEP_TEMPLATES = {
+    "step1": STEP1_TEMPLATE,
+    "step2": STEP2_TEMPLATE,
+    "step3": STEP3_TEMPLATE,
+    "step4": STEP4_TEMPLATE,
+    "step5": STEP5_TEMPLATE,
+    "step6": STEP6_TEMPLATE,
+}
+
+
+def build_loop_step_messages(step_name: str, payload: dict[str, Any]) -> list[dict[str, str]]:
+    template = LOOP_STEP_TEMPLATES[step_name]
+    payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    return [
+        {"role": "system", "content": STEP_SYSTEM_PROMPT},
+        {"role": "user", "content": template.format(payload=payload_text)},
+    ]
+
+
+def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
+    payload = {
+        "entity_failure_contribution": compact_rca_ir.get("entity_failure_contribution", {}),
+    }
+    return build_loop_step_messages("step1", payload)
+
+
+def build_loop_step2_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
+    payload = {
+        "entity_failure_contribution": compact_rca_ir.get("entity_failure_contribution", {}),
+        "shared_failure_observations": compact_rca_ir.get("shared_failure_observations", []),
+        "interface_failure_distribution": compact_rca_ir.get("interface_failure_distribution", {}),
+        "failure_stage_distribution": compact_rca_ir.get("failure_stage_distribution", {}),
+    }
+    return build_loop_step_messages("step2", payload)
+
+
+def build_loop_step3_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
+    payload = {
+        "subscriber_cause_distribution": compact_rca_ir.get("subscriber_cause_distribution", []),
+        "subscriber_plmn_distribution": compact_rca_ir.get("subscriber_plmn_distribution", []),
+        "subscriber_mobility_summary": compact_rca_ir.get("subscriber_mobility_summary", {}),
+        "representative_imsi": compact_rca_ir.get("subscriber_failure_patterns", [])[:3],
+    }
+    return build_loop_step_messages("step3", payload)
+
+
+def build_loop_step4_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
+    payload = {
+        "subscriber_failure_patterns": compact_rca_ir.get("subscriber_failure_patterns", []),
+        "subscriber_cause_distribution": compact_rca_ir.get("subscriber_cause_distribution", []),
+        "subscriber_plmn_distribution": compact_rca_ir.get("subscriber_plmn_distribution", []),
+        "subscriber_mobility_summary": compact_rca_ir.get("subscriber_mobility_summary", {}),
+    }
+    return build_loop_step_messages("step4", payload)
+
+
+def build_loop_step5_messages(network_evidence: str, subscriber_evidence: str) -> list[dict[str, str]]:
+    payload = {
+        "network_evidence": network_evidence,
+        "subscriber_evidence": subscriber_evidence,
+    }
+    return build_loop_step_messages("step5", payload)
+
+
+def build_loop_step6_messages(correlation: str) -> list[dict[str, str]]:
+    payload = {
+        "correlation": correlation,
+    }
+    return build_loop_step_messages("step6", payload)
+
+
+def build_loop_reasoning_steps(compact_rca_ir: dict[str, Any], previous_results: list[str]) -> list[dict[str, str]]:
+    step_index = len(previous_results)
+    if step_index == 0:
+        return build_loop_step2_messages(compact_rca_ir)
+    if step_index == 1:
+        return build_loop_step4_messages(compact_rca_ir)
+    if step_index == 2:
+        return build_loop_step5_messages(previous_results[0], previous_results[1])
+    if step_index == 3:
+        return build_loop_step6_messages(previous_results[2])
+    return build_loop_step6_messages(previous_results[-1] if previous_results else "")
 
 
 def build_report_prompt_from_reasoning(

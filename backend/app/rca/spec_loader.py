@@ -450,6 +450,16 @@ GTPV2C_CAUSE_MAP = {
     82: "Denied_in_RAT",
     83: "Preferred_PDN_type_not_supported",
     84: "All_dynamic_addresses_occupied",
+    85: "UE_context_without_TFT_already_activated",
+    86: "Protocol_type_not_supported",
+    87: "UE_not_responding",
+    88: "UE_refuses",
+    89: "Service_denied",
+    90: "Unable_to_page_UE",
+    91: "No_memory_available",
+    92: "User_authentication_failed",
+    93: "APN_access_denied_no_subscription",
+    94: "Request_rejected_reason_not_specified",
     900: "TIMEOUT",
 }
 

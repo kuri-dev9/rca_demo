@@ -34,6 +34,7 @@ from app.rca.report_builder import (
     build_compact_reasoning_json,
     build_semantic_summary,
     build_rca_messages,
+    build_loop_reasoning_steps,
     build_reasoning_messages,
 )
 
@@ -65,6 +66,120 @@ def _rss_mb() -> float:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
         return 0.0
+
+
+def _append_entity_contribution_section(lines: list[str], title: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    lines += [
+        " ",
+        f"### {title}",
+        "| Entity | Attempts | Failures | Failure Contribution | Top Failure Pattern |",
+        "|---|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        patterns = row.get("top_failure_patterns", [])
+        pattern_text = ", ".join(
+            f"{p.get('cause')}({p.get('count')})"
+            for p in patterns
+            if p.get("cause") and p.get("count") is not None
+        ) or "-"
+        lines.append(
+            f"| {row.get('entity_id')} | {row.get('attempts', 0):,} | {row.get('failures', 0):,} "
+            f"| {row.get('failure_contribution_pct', 0)}% | {pattern_text} |"
+        )
+
+
+def _subscriber_pattern_rows(analysis: RcaAnalysis) -> list[dict[str, Any]]:
+    rows = []
+    for seq in analysis.top_failed_imsi_sequences:
+        attempts = int(seq.get("attempts") or 0)
+        failures = int(seq.get("failures") or 0)
+        rows.append({
+            "imsi_prefix": seq.get("imsi", ""),
+            "plmn": seq.get("plmn", ""),
+            "stage": seq.get("stage", ""),
+            "cause": seq.get("cause", ""),
+            "attempts": attempts,
+            "failures": failures,
+            "imsi_failure_rate": round(failures / attempts * 100, 1) if attempts else 0.0,
+            "total_failure_share": round(failures / analysis.failure_count * 100, 1)
+            if analysis.failure_count else 0.0,
+            "mme_count": int(seq.get("mme_count") or 0),
+            "enb_count": int(seq.get("enb_count") or 0),
+            "zero_success": int(seq.get("success") or 0) == 0,
+        })
+    return rows
+
+
+def _append_subscriber_pattern_section(lines: list[str], rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    lines += [
+        " ",
+        "### Subscriber Failure Pattern Summary",
+        "| IMSI | PLMN | Stage | Cause | Attempts | Failures | IMSI Failure Rate | Total Failure Share | MME Count | eNB Count | Zero Success |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row.get('imsi_prefix')} | {row.get('plmn') or '-'} "
+            f"| {row.get('stage') or '-'} | {row.get('cause') or '-'} "
+            f"| {row.get('attempts', 0):,} | {row.get('failures', 0):,} "
+            f"| {row.get('imsi_failure_rate', 0.0)}% | {row.get('total_failure_share', 0.0)}% "
+            f"| {row.get('mme_count', 0):,} "
+            f"| {row.get('enb_count', 0):,} | {'Y' if row.get('zero_success') else 'N'} |"
+        )
+
+
+def _pct(value: int, total: int) -> str:
+    return f"{round(value / total * 100, 1)}%" if total else "0.0%"
+
+
+def _append_subscriber_statistics_sections(lines: list[str], analysis: RcaAnalysis) -> None:
+    if analysis.subscriber_cause_distribution:
+        lines += [
+            " ",
+            "### Subscriber Cause Distribution",
+            "| Cause | Failures | Failure Ratio | IMSI Count | PLMN Count |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for row in analysis.subscriber_cause_distribution:
+            lines.append(
+                f"| {row.get('cause') or '-'} | {row.get('failures', 0):,} "
+                f"| {row.get('failure_ratio', 0.0)}% | {row.get('imsi_count', 0):,} "
+                f"| {row.get('plmn_count', 0):,} |"
+            )
+
+    if analysis.subscriber_plmn_distribution:
+        lines += [
+            " ",
+            "### Subscriber PLMN Distribution",
+            "| PLMN | IMSI Count | Failures | Top Cause |",
+            "|---|---:|---:|---|",
+        ]
+        for row in analysis.subscriber_plmn_distribution:
+            lines.append(
+                f"| {row.get('plmn') or '-'} | {row.get('imsi_count', 0):,} "
+                f"| {row.get('failures', 0):,} | {row.get('top_cause') or '-'} |"
+            )
+
+    summary = analysis.subscriber_mobility_summary or {}
+    affected = int(summary.get("affected_imsi_count") or len(analysis.affected_imsi_set))
+    if affected:
+        repeated = int(summary.get("repeated_failure_imsi_count") or 0)
+        multi_mme = int(summary.get("multi_mme_imsi_count") or 0)
+        multi_enb = int(summary.get("multi_enb_imsi_count") or 0)
+        zero_success = int(summary.get("zero_success_imsi_count") or 0)
+        lines += [
+            " ",
+            "### Subscriber Mobility Summary",
+            f"- Affected IMSI: {affected:,}",
+            f"- Repeated Failure IMSI: {repeated:,} ({_pct(repeated, affected)})",
+            f"- Multi MME IMSI: {multi_mme:,} ({_pct(multi_mme, affected)})",
+            f"- Multi eNB IMSI: {multi_enb:,} ({_pct(multi_enb, affected)})",
+            f"- Zero Success IMSI: {zero_success:,} ({_pct(zero_success, affected)})",
+        ]
 
 
 def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
@@ -108,56 +223,14 @@ def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
         for stage, cnt in stage_hist.most_common(8):
             lines.append(f"| {stage} | {cnt:,} |")
 
-    # MME Baseline
-    if analysis.mme_baseline:
-        lines += [
-            " ",
-            "### MME",
-            "| MME | 시도 | 성공 | 실패 | 실패율 | Anomaly Ratio |",
-            "|---|---|---|---|---|---|",
-        ]
-        for m in analysis.mme_baseline[:10]:
-            lines.append(
-                f"| {m['mme_id']} | {m['attempts']:,} | {m['success']:,} "
-                f"| {m['failures']:,} | {m['failure_rate']}% | {m['anomaly_ratio']} |"
-            )
+    # Entity failure contribution
+    entity_contrib = analysis.entity_failure_contributions or {}
+    _append_entity_contribution_section(lines, "MME Failure Contribution", entity_contrib.get("mme", []))
+    _append_entity_contribution_section(lines, "eNB Failure Contribution", entity_contrib.get("enb", []))
+    _append_entity_contribution_section(lines, "SGW Failure Contribution", entity_contrib.get("sgw", []))
 
-    # eNB Baseline
-    if analysis.enb_baseline:
-        lines += [
-            " ",
-            "### eNB",
-            "| eNB | 시도 | 성공 | 실패 | 실패율 | Anomaly Ratio |",
-            "|---|---|---|---|---|---|",
-        ]
-        for e in analysis.enb_baseline[:10]:
-            lines.append(
-                f"| {e['enb_id']} | {e['attempts']:,} | {e['success']:,} "
-                f"| {e['failures']:,} | {e['failure_rate']}% | {e['anomaly_ratio']} |"
-            )
-
-    # Representative Failure Chains (중복 제거, top 5)
-    seen: set[str] = set()
-    rep_chains = []
-    for c in analysis.failure_chains:
-        key = " → ".join(c.chain)
-        if key not in seen:
-            seen.add(key)
-            rep_chains.append(c)
-        if len(rep_chains) >= 5:
-            break
-    if rep_chains:
-        lines += ["", "### 단말 실패 체인"]
-        for i, c in enumerate(rep_chains, 1):
-            lines += [
-                " ",
-                f"**IMSI[{i}]: `{c.imsi}`**",
-                f"- Procedure: `{c.procedure}`",
-                f"- Interface: `{c.failure_interface}`",
-                f"- Failure Point: `{c.failure_point}`",
-                f"- Cause: `{c.failure_cause_name}`",
-                f"- Flow: {' → '.join(c.chain)}",
-            ]
+    _append_subscriber_pattern_section(lines, _subscriber_pattern_rows(analysis))
+    _append_subscriber_statistics_sections(lines, analysis)
 
     # Shared Failure Observations
     if analysis.shared_failure_signatures:
@@ -242,6 +315,7 @@ async def _analyze_file_path(
     filename: str,
     model: str,
     db: AsyncSession,
+    loop_mode: bool = False,
 ) -> dict[str, Any]:
     records = analysis = compact_rca_ir = assistant_message = response = None
     try:
@@ -258,7 +332,10 @@ async def _analyze_file_path(
         conv = Conversation(
             title=f"RCA: {filename}",
             model=model or RCA_MODEL,
-            system_prompt=json.dumps({"compact_rca_ir": compact_rca_ir}, ensure_ascii=False),
+            system_prompt=json.dumps({
+                "compact_rca_ir": compact_rca_ir,
+                "rca_loop_mode": loop_mode,
+            }, ensure_ascii=False),
         )
         db.add(conv)
         await db.flush()
@@ -289,6 +366,7 @@ async def _analyze_file_path(
 async def analyze_xdr(
     file: UploadFile = File(...),
     model: str = Form(RCA_MODEL),
+    loop_mode: bool = Form(False),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -317,7 +395,7 @@ async def analyze_xdr(
             raise HTTPException(status_code=500, detail=f"파일 저장 실패: {exc}") from exc
 
     try:
-        return await _analyze_file_path(tmp_path, file.filename, model or RCA_MODEL, db)
+        return await _analyze_file_path(tmp_path, file.filename, model or RCA_MODEL, db, loop_mode)
     finally:
         try:
             os.unlink(tmp_path)
@@ -328,12 +406,13 @@ async def analyze_xdr(
 @sample_router.post("/sample")
 async def analyze_sample_xdr(
     model: str = Form(RCA_MODEL),
+    loop_mode: bool = Form(False),
     db: AsyncSession = Depends(get_db),
 ):
     sample_file_path = _sample_file_path()
     if not sample_file_path.exists():
         return {"success": False, "message": "sample file not found"}
-    return await _analyze_file_path(str(sample_file_path), sample_file_path.name, model or RCA_MODEL, db)
+    return await _analyze_file_path(str(sample_file_path), sample_file_path.name, model or RCA_MODEL, db, loop_mode)
 
 
 @router.get("/conversations/{conv_id}/report")
@@ -423,6 +502,7 @@ async def stream_rca_reasoning(
     except Exception:
         raise HTTPException(status_code=422, detail="RCA 컨텍스트 파싱 실패")
 
+    loop_mode = bool(context.get("rca_loop_mode", False)) if isinstance(context, dict) else False
     if isinstance(context, dict) and "compact_rca_ir" in context:
         compact_rca_ir = context["compact_rca_ir"]
     else:
@@ -432,26 +512,62 @@ async def stream_rca_reasoning(
 
     async def generate():
         response_parts: list[str] = []
+        step_results: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                llm_payload = {"model": conv.model or RCA_MODEL, "messages": messages, "stream": True}
-                yield prompt_debug_event(1, "RCA Reasoning Prompt", llm_payload)
-                async with client.stream(
-                    "POST",
-                    f"{settings.ollama_base_url}/api/chat",
-                    json=llm_payload,
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            response_parts.append(content)
-                            yield f"data: {json.dumps({'token': content})}\n\n"
-                        if chunk.get("done"):
-                            break
+                loop_step_labels = ["STEP 1", "STEP 2", "STEP 3", "STEP 4"]
+                total_steps = len(loop_step_labels) if loop_mode else 1
+                for step_index in range(total_steps):
+                    call_messages = (
+                        build_loop_reasoning_steps(compact_rca_ir, step_results)
+                        if loop_mode
+                        else messages
+                    )
+                    logical_step = loop_step_labels[step_index] if loop_mode else ""
+                    label = f"RCA Loop {logical_step}" if loop_mode else "RCA Reasoning Prompt"
+                    if loop_mode:
+                        try:
+                            marker_text = f"[{logical_step} 입력]\n"
+                            step_input = json.loads(call_messages[1]["content"].split(marker_text, 1)[1])
+                            logger.debug(
+                                "rca loop %s input payload=%s",
+                                logical_step,
+                                json.dumps(step_input, ensure_ascii=False),
+                            )
+                        except Exception:
+                            logger.debug("rca loop %s input payload parse failed", logical_step)
+                    if loop_mode:
+                        marker = f"\n{logical_step} 결과\n"
+                        response_parts.append(marker)
+                        yield f"data: {json.dumps({'token': marker})}\n\n"
+
+                    step_response_parts: list[str] = []
+                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True}
+                    yield prompt_debug_event(step_index + 1, label, llm_payload)
+                    async with client.stream(
+                        "POST",
+                        f"{settings.ollama_base_url}/api/chat",
+                        json=llm_payload,
+                    ) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            chunk = json.loads(line)
+                            content = chunk.get("message", {}).get("content", "")
+                            if content:
+                                response_parts.append(content)
+                                step_response_parts.append(content)
+                                yield f"data: {json.dumps({'token': content})}\n\n"
+                            if chunk.get("done"):
+                                break
+                    step_response = "".join(step_response_parts)
+                    step_results.append(step_response)
+                    if loop_mode and step_index < total_steps - 1:
+                        separator = "\n\n"
+                        response_parts.append(separator)
+                        yield f"data: {json.dumps({'token': separator})}\n\n"
+                    del step_response_parts, step_response
         except httpx.HTTPError as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
             return
@@ -460,13 +576,15 @@ async def stream_rca_reasoning(
         if full_response.strip():
             conv.system_prompt = json.dumps({
                 "compact_rca_ir": compact_rca_ir,
-                "rca_reasoning": full_response,
+                "rca_loop_mode": loop_mode,
+                "rca_reasoning_steps": step_results if loop_mode else [],
+                "rca_reasoning": step_results[-1] if loop_mode and step_results else full_response,
             }, ensure_ascii=False)
             db.add(Message(conversation_id=conv_id, role="assistant", content=full_response))
             await db.commit()
 
         yield f"data: {json.dumps({'done': True})}\n\n"
-        del response_parts, full_response
+        del response_parts, step_results, full_response
         gc.collect()
 
     return StreamingResponse(generate(), media_type="text/event-stream")

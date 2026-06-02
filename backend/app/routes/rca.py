@@ -32,7 +32,6 @@ from app.rca.parser import parse_file
 from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
-    build_semantic_summary,
     build_rca_messages,
     build_loop_reasoning_steps,
     build_reasoning_messages,
@@ -298,18 +297,6 @@ def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]
     }
 
 
-def _parse_reasoning_json(text: str) -> Any:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        return cleaned
-
-
 async def _analyze_file_path(
     filepath: str,
     filename: str,
@@ -515,7 +502,7 @@ async def stream_rca_reasoning(
         step_results: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                loop_step_labels = ["STEP 1", "STEP 2", "STEP 3", "STEP 4"]
+                loop_step_labels = ["STEP 1", "STEP 2", "STEP 3"]
                 total_steps = len(loop_step_labels) if loop_mode else 1
                 for step_index in range(total_steps):
                     call_messages = (

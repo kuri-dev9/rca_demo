@@ -734,37 +734,7 @@ def build_gemma4_system_prompt() -> str:
 
 반드시 입력 데이터만 사용한다.
 반드시 한국어로 작성한다.
-반드시 아래 Markdown 구조만 출력한다.
-
-## 최종 RCA
-
-| 항목 | 값 |
-|---|---|
-| 판단 | Network-side Dominant 또는 Subscriber-side Dominant 또는 Mixed 또는 Unknown |
-| 신뢰도 | High 또는 Medium 또는 Low |
-
-## 판단 근거
-
-### Network-side 근거
-
-### Subscriber-side 근거
-
-### 반대 근거 또는 제한 사항
-
-## 우선 확인 대상
-
-- 우선 점검 장비:
-- 우선 점검 Interface:
-- 우선 점검 IMSI:
-- 추가 확인 필요 데이터:
-
-중요:
-- Classification 출력 금지
-- Reasoning 출력 금지
-- Conclusion 출력 금지
-- Summary 출력 금지
-- 위 Markdown 구조 이외의 제목 생성 금지
-- 출력 첫 줄은 반드시 `## 최종 RCA` 로 시작한다."""
+"""
 
 
 def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[dict[str, str]]:

@@ -629,19 +629,8 @@ def build_report_prompt_from_reasoning(
     ]
 
 
-def build_rca_messages(summary: dict[str, Any]) -> list[dict[str, str]]:
-    """
-    RCA LLM 호출용 messages (system + user).
-    LLM이 RCA 판단/보고서를 직접 생성한다.
-    """
-    observation = summary.get("compact_rca_ir", summary) if isinstance(summary, dict) else summary
-    if isinstance(observation, dict):
-        observation = {
-            k: v
-            for k, v in observation.items()
-            if k not in {"subscriber_cause_distribution", "subscriber_plmn_distribution"}
-        }
-    system = """\
+def build_default_system_prompt() -> str:
+    return """\
 당신은 LTE/EPC 네트워크 RCA 분석 전문가입니다.
 
 반드시 입력 데이터만 사용합니다.
@@ -738,6 +727,61 @@ Subscriber-side 우세 조건:
 
 Markdown을 사용하고, HTML은 사용하지 않습니다."""
 
+
+def build_gemma4_system_prompt() -> str:
+    return """\
+당신은 LTE/EPC RCA 분석 엔진이다.
+
+반드시 입력 데이터만 사용한다.
+반드시 한국어로 작성한다.
+반드시 아래 Markdown 구조만 출력한다.
+
+## 최종 RCA
+
+| 항목 | 값 |
+|---|---|
+| 판단 | Network-side Dominant 또는 Subscriber-side Dominant 또는 Mixed 또는 Unknown |
+| 신뢰도 | High 또는 Medium 또는 Low |
+
+## 판단 근거
+
+### Network-side 근거
+
+### Subscriber-side 근거
+
+### 반대 근거 또는 제한 사항
+
+## 우선 확인 대상
+
+- 우선 점검 장비:
+- 우선 점검 Interface:
+- 우선 점검 IMSI:
+- 추가 확인 필요 데이터:
+
+중요:
+- Classification 출력 금지
+- Reasoning 출력 금지
+- Conclusion 출력 금지
+- Summary 출력 금지
+- 위 Markdown 구조 이외의 제목 생성 금지
+- 출력 첫 줄은 반드시 `## 최종 RCA` 로 시작한다."""
+
+
+def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[dict[str, str]]:
+    """
+    RCA LLM 호출용 messages (system + user).
+    LLM이 RCA 판단/보고서를 직접 생성한다.
+    """
+    observation = summary.get("compact_rca_ir", summary) if isinstance(summary, dict) else summary
+    if isinstance(observation, dict):
+        observation = {
+            k: v
+            for k, v in observation.items()
+            if k not in {"subscriber_cause_distribution", "subscriber_plmn_distribution"}
+        }
+    is_gemma = "gemma" in (model_name or "").lower()
+    system = build_gemma4_system_prompt() if is_gemma else build_default_system_prompt()
+
     ctx_json = json.dumps(observation, ensure_ascii=False, indent=2)
     user = f"""\
 다음 xDR 관측 데이터를 분석하여 RCA 판단 결과를 한국어로 작성하세요.
@@ -771,6 +815,22 @@ Markdown을 사용하고, HTML은 사용하지 않습니다."""
 - 우선 점검 Interface:
 - 우선 점검 IMSI:
 - 추가 확인 필요 데이터:
+"""
+    if is_gemma:
+        user += """\
+
+중요:
+출력 형식을 지키지 않으면 오답이다.
+반드시 다음 문자열로 시작한다.
+
+## 최종 RCA
+
+Classification:
+Reasoning:
+Conclusion:
+Summary:
+
+사용 금지
 """
 
     return [

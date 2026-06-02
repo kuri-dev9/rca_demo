@@ -428,7 +428,7 @@ async def stream_rca_report(
     except Exception:
         raise HTTPException(status_code=422, detail="RCA 컨텍스트 파싱 실패")
 
-    messages = build_rca_messages(context)
+    messages = build_rca_messages(context, conv.model or RCA_MODEL)
     logger.debug("rca report prompt chars=%s", sum(len(m["content"]) for m in messages))
 
     async def generate():
@@ -501,7 +501,7 @@ async def stream_rca_reasoning(
     else:
         # Legacy conversations may still have the old full observability payload.
         compact_rca_ir = build_compact_reasoning_json(context if isinstance(context, dict) else {})
-    messages = build_rca_messages({"compact_rca_ir": compact_rca_ir})
+    messages = build_rca_messages({"compact_rca_ir": compact_rca_ir}, conv.model or RCA_MODEL)
 
     async def generate():
         response_parts: list[str] = []

@@ -600,24 +600,42 @@ def build_report_prompt_from_reasoning(
     compact_rca_ir: dict[str, Any],
     reasoning: Any,
 ) -> list[dict[str, str]]:
-    ir_json = json.dumps(compact_rca_ir, ensure_ascii=False, indent=2)
-    reasoning_text = json.dumps(reasoning, ensure_ascii=False, indent=2) if not isinstance(reasoning, str) else reasoning
+    # Report 렌더링에 필요한 핵심 통계만 전달 (토큰 절감)
+    compact_summary = {
+        k: compact_rca_ir.get(k)
+        for k in (
+            "statistics",
+            "interface_failure_distribution",
+            "failure_stage_distribution",
+            "entity_failure_contribution",
+            "subscriber_summary",
+            "burst_detected",
+        )
+        if k in compact_rca_ir
+    }
+    ir_json = json.dumps(compact_summary, ensure_ascii=False, indent=2)
+
+    # reasoning이 너무 길면 앞부분만 사용
+    if isinstance(reasoning, str):
+        reasoning_text = reasoning[:4000]
+    else:
+        reasoning_text = json.dumps(reasoning, ensure_ascii=False)[:4000]
+
     system = (
         "당신은 LTE/EPC 운영 보고서 작성자입니다. "
         "새로운 RCA 판단을 하지 말고, 제공된 데이터와 reasoning 결과를 운영자용 markdown report로 렌더링만 하세요. "
         "reasoning 결과를 변경하거나 보강하지 마세요."
     )
     user = f"""\
-아래 Compact RCA IR과 LLM reasoning 결과만 기반으로 운영자용 markdown report를 작성하세요.
+아래 RCA 통계 요약과 LLM reasoning 결과만 기반으로 운영자용 markdown report를 작성하세요.
 
 중요:
 - 새로운 원인 판단 금지
 - reasoning 결과를 그대로 반영
-- Compact RCA IR과 reasoning 결과에 없는 장비/IMSI/원인/통계 생성 금지
-- 원본 xDR 또는 추가 분석 데이터가 없다고 가정하고, reasoning 결과를 포맷팅만 수행
+- 제공된 데이터에 없는 장비/IMSI/원인/통계 생성 금지
 - markdown table 사용
 
-[Compact RCA IR]
+[RCA 통계 요약]
 {ir_json}
 
 [LLM reasoning result]
@@ -821,17 +839,10 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
         user += """\
 
 중요:
-출력 형식을 지키지 않으면 오답이다.
-반드시 다음 문자열로 시작한다.
-
-## 최종 RCA
-
-Classification:
-Reasoning:
-Conclusion:
-Summary:
-
-사용 금지
+- 반드시 ## 최종 RCA 로 시작하세요.
+- 위 출력 형식을 정확히 준수하세요.
+- Classification:, Reasoning:, Conclusion:, Summary: 헤더는 절대 사용하지 마세요.
+- 위 Markdown 구조 이외의 섹션 헤더를 추가하지 마세요.
 """
 
     return [

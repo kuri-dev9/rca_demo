@@ -964,14 +964,12 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     stats = _get_data(observation, "statistics", {})
     entity = _get_data(observation, "entity_failure_contribution", {}) \
         if _is_llm(observation, "entity_failure_contribution") else {}
-    shared = _get_data(observation, "shared_failure_observations", []) \
-        if _is_llm(observation, "shared_failure_observations") else []
+    # shared = _get_data(...) if _is_llm(...) else []  # 장애 패턴 그룹으로 대체됨
     subscriber = _get_data(observation, "subscriber_summary", {}) \
         if _is_llm(observation, "subscriber_summary") else {}
     call_type_failure_summary = _get_data(observation, "call_type_failure_summary", {}) \
         if _is_llm(observation, "call_type_failure_summary") else {}
-    error_chains = _get_data(observation, "error_chains", []) \
-        if _is_llm(observation, "error_chains") else []
+    # error_chains = _get_data(...) if _is_llm(...) else []  # Failure Flow로 대체됨
     failure_flow = _get_data(observation, "failure_flow", []) \
         if _is_llm(observation, "failure_flow") else []
 
@@ -1028,21 +1026,20 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
                 )
         lines.append("")
 
-    if shared:
-        lines.append("## 반복 장애 패턴")
-        for s in shared:
-            enb_count = s['affected_enb_count']
-            # eNB 집중도: 1~2개면 집중, 그 이상이면 분산
-            enb_label = "[집중]" if enb_count <= 2 else "[분산]"
-            lines.append(
-                f"- {s.get('call_type', '-')} / {s.get('interface', '-')} / "
-                f"{s.get('message', '-')} / {s.get('stage', '-')} / {s.get('cause', '-')}: "
-                f"{s['count']}건, "
-                f"영향 IMSI {s['affected_imsi_count']}명, "
-                f"MME {s['affected_mme_count']}개, "
-                f"eNB {enb_count}개 {enb_label}"
-            )
-        lines.append("")
+    # if shared:  # 장애 패턴 그룹으로 대체됨
+    #     lines.append("## 반복 장애 패턴")
+    #     for s in shared:
+    #         enb_count = s['affected_enb_count']
+    #         enb_label = "[집중]" if enb_count <= 2 else "[분산]"
+    #         lines.append(
+    #             f"- {s.get('call_type', '-')} / {s.get('interface', '-')} / "
+    #             f"{s.get('message', '-')} / {s.get('stage', '-')} / {s.get('cause', '-')}: "
+    #             f"{s['count']}건, "
+    #             f"영향 IMSI {s['affected_imsi_count']}명, "
+    #             f"MME {s['affected_mme_count']}개, "
+    #             f"eNB {enb_count}개 {enb_label}"
+    #         )
+    #     lines.append("")
 
     if failure_flow:
         lines.append("## Failure Flow Summary")
@@ -1068,9 +1065,17 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
                 )
         lines.append("")
 
-    # 패턴 그룹화: eNB 집중도 기반
-    ran_patterns = [s for s in shared if s.get("affected_enb_count", 0) <= 2]
-    core_patterns = [s for s in shared if s.get("affected_enb_count", 0) > 2]
+    # 패턴 그룹화: eNB 집중도 기반 (shared 대신 _get_data 직접 호출)
+    ran_patterns = [
+        s for s in _get_data(observation, "shared_failure_observations", [])
+        if _is_llm(observation, "shared_failure_observations")
+        and s.get("affected_enb_count", 0) <= 2
+    ]
+    core_patterns = [
+        s for s in _get_data(observation, "shared_failure_observations", [])
+        if _is_llm(observation, "shared_failure_observations")
+        and s.get("affected_enb_count", 0) > 2
+    ]
 
     if ran_patterns or core_patterns:
         lines.append("## 장애 패턴 그룹")
@@ -1099,20 +1104,20 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
                 )
             lines.append("")
 
-    if error_chains:
-        lines.append("## Top Error Chains")
-        for row in error_chains[:10]:
-            first = row.get("first_error", {})
-            last = row.get("last_error", {})
-            lines.append(
-                f"- {row.get('call_type', '-')}: "
-                f"First {first.get('interface', '-')} / "
-                f"{first.get('message', '-')} / {first.get('cause', '-')} "
-                f"→ Last {last.get('interface', '-')} / "
-                f"{last.get('message', '-')} / {last.get('cause', '-')} "
-                f"({row.get('count', 0)}건)"
-            )
-        lines.append("")
+    # if error_chains:  # Failure Flow로 대체됨
+    #     lines.append("## Top Error Chains")
+    #     for row in error_chains[:10]:
+    #         first = row.get("first_error", {})
+    #         last = row.get("last_error", {})
+    #         lines.append(
+    #             f"- {row.get('call_type', '-')}: "
+    #             f"First {first.get('interface', '-')} / "
+    #             f"{first.get('message', '-')} / {first.get('cause', '-')} "
+    #             f"→ Last {last.get('interface', '-')} / "
+    #             f"{last.get('message', '-')} / {last.get('cause', '-')} "
+    #             f"({row.get('count', 0)}건)"
+    #         )
+    #     lines.append("")
 
     if subscriber:
         lines += [
@@ -1129,25 +1134,25 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "---",
         "",
         "위 데이터를 기반으로 아래 순서로 분석하세요.",
-        "데이터에 있는 call_type, 장비명, interface, message, cause, 수치를 그대로 인용하세요.",
+        "call_type, 장비명, interface, message, cause, 수치는 데이터 그대로 인용하세요.",
         "데이터에 없는 값은 생성하지 마세요.",
+        "확정할 수 없는 내용은 '가능성' 또는 '추가 확인 필요'로 표현하세요.",
         "",
-        "## 분석 순서",
-        "1. Failure Flow 분석: 각 Flow의 시작점과 종료점이 의미하는 장애 위치를 설명하세요.",
-        "2. 패턴 그룹화: 위 장애 패턴 그룹(RAN 후보 / Core 후보)의 타당성을 검토하고 필요시 재분류하세요.",
-        "3. 상관관계 분석: 동일 시간대 또는 동일 장비에서 복수 패턴이 겹치는지 분석하세요.",
-        "4. 영향도 평가: 아래 테이블 형식으로 RAN/Core/Subscriber 각각의 영향도를 평가하세요.",
+        "1. Failure Flow 분석",
+        "   - 각 Flow의 시작/종료 메시지가 3GPP 절차상 어느 구간 장애인지 설명",
+        "   - RAN 후보 / Core 후보 그룹의 타당성 검토 및 필요시 재분류",
         "",
-        "## 영향도 테이블 (반드시 포함)",
-        "| 구분 | 영향도 | 주요 근거 |",
-        "|---|---|---|",
-        "| RAN/Access | High / Medium / Low | 데이터 기반 근거 |",
-        "| Core Network | High / Medium / Low | 데이터 기반 근거 |",
-        "| Subscriber/UE | High / Medium / Low | 데이터 기반 근거 |",
+        "2. 영향도 평가 (아래 테이블로 출력)",
+        "   | 구분 | 영향도 | 주요 근거 |",
+        "   |---|---|---|",
+        "   | RAN/Access | High/Medium/Low | 근거 |",
+        "   | Core Network | High/Medium/Low | 근거 |",
+        "   | Subscriber/UE | High/Medium/Low | 근거 |",
+        "   Subscriber 영향도는 반드시 repeated_failure_ratio, top_imsi_failure_share 수치를 근거로 평가",
         "",
-        "5. 최종 RCA: 영향도가 높은 Domain부터 장애 위치와 조치 방향을 작성하세요.",
-        "   조치 방향은 데이터에 있는 장비/인터페이스 기준으로만 작성하세요.",
-        "   확정할 수 없는 내용은 반드시 '가능성' 또는 '추가 확인 필요'로 표현하세요.",
+        "3. 최종 RCA",
+        "   - 영향도 High인 Domain부터 장애 위치와 조치 방향 작성",
+        "   - 조치 방향은 데이터에 있는 장비/인터페이스 기준으로만 작성",
     ]
 
     return "\n".join(lines)

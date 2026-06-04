@@ -142,6 +142,35 @@ def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> lis
     ]
 
 
+def _build_failure_flow(error_chains: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    error_chains의 first_error → last_error를
+    사람이 읽기 쉬운 Failure Flow 형태로 변환.
+    동일한 first/last면 단일 노드 장애로 표현.
+    """
+    flows = []
+    for chain in error_chains:
+        first = chain.get("first_error", {})
+        last = chain.get("last_error", {})
+        first_msg = first.get("message", "-")
+        first_cause = first.get("cause", "-")
+        last_msg = last.get("message", "-")
+        last_cause = last.get("cause", "-")
+
+        is_single = (first_msg == last_msg and first_cause == last_cause)
+        flows.append({
+            "call_type": chain.get("call_type", "-"),
+            "first_message": first_msg,
+            "first_cause": first_cause,
+            "last_message": last_msg,
+            "last_cause": last_cause,
+            "is_single_node": is_single,
+            "count": chain.get("count", 0),
+        })
+    flows.sort(key=lambda x: x["count"], reverse=True)
+    return flows
+
+
 def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
     """Compact RCA IR used by the LLM reasoning path."""
     stage_counter: Counter[str] = Counter()
@@ -226,6 +255,10 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
         "error_chains": {
             "llm": True,
             "data": analysis.error_chains,
+        },
+        "failure_flow": {
+            "llm": True,
+            "data": _build_failure_flow(analysis.error_chains),
         },
         "entity_failure_contribution": {
             "llm": True,
@@ -400,6 +433,28 @@ def _ir_to_markdown(ir: dict[str, Any]) -> str:
                 f"| {row.get('call_type') or '-'} "
                 f"| {first_text} | {last_text} | {row.get('count', 0):,} |"
             )
+
+    # Failure Flow Summary
+    failure_flow = _get_data(ir, "failure_flow", [])
+    if failure_flow:
+        lines += [
+            " ",
+            "### Failure Flow Summary",
+            "| Call Type | Flow | 건수 |",
+            "|---|---|---:|",
+        ]
+        for flow in failure_flow[:8]:
+            call_type = flow.get("call_type", "-")
+            first_msg = flow.get("first_message", "-")
+            first_cause = flow.get("first_cause", "-")
+            last_msg = flow.get("last_message", "-")
+            last_cause = flow.get("last_cause", "-")
+            count = flow.get("count", 0)
+            if flow.get("is_single_node", False):
+                flow_text = f"{first_msg}({first_cause}) → (단일)"
+            else:
+                flow_text = f"{first_msg}({first_cause}) → {last_msg}({last_cause})"
+            lines.append(f"| {call_type} | {flow_text} | {count:,} |")
 
     # 유형별 실패 통계 (shared_failure_observations)
     shared = _get_data(ir, "shared_failure_observations", [])
@@ -888,12 +943,20 @@ def build_gemma4_system_prompt() -> str:
     return """\
 당신은 LTE/EPC 네트워크 장애 분석 전문가다.
 3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
-아래 제공된 데이터를 기반으로 장애 위치를 특정하고 조치 방향을 제시한다.
+아래 제공된 데이터를 기반으로 장애 흐름과 패턴 간 상관관계를 분석하고 영향도를 평가한다.
 
-반드시 지킬 것:
-- 데이터에 있는 장비명, interface, message, stage, cause, 수치를 그대로 인용한다.
-- 데이터에 없는 장비, IMSI, Cause, Interface, Stage, 수치를 생성하지 않는다.
+출력 규칙:
 - 반드시 한국어로 작성한다.
+- 데이터에 있는 장비명, interface, message, cause, 수치를 그대로 인용한다.
+- 데이터에 없는 장비, IMSI, Cause, Interface를 생성하지 않는다.
+- 확정할 수 없는 내용은 반드시 "가능성" 또는 "추가 확인 필요"로 표현한다.
+- 데이터에 없는 원인을 확정적으로 기술하지 않는다.
+- LTE/EPC 일반 지식은 사용 가능하나 데이터 근거 없이 원인을 단정하지 않는다.
+
+영향도 평가 기준:
+- High: 해당 Domain 장애가 전체 실패의 30% 이상이거나 특정 장비에 집중
+- Medium: 전체 실패의 10~30% 또는 복수 장비에 분산
+- Low: 전체 실패의 10% 미만 또는 단발성
 """
 
 
@@ -909,6 +972,8 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         if _is_llm(observation, "call_type_failure_summary") else {}
     error_chains = _get_data(observation, "error_chains", []) \
         if _is_llm(observation, "error_chains") else []
+    failure_flow = _get_data(observation, "failure_flow", []) \
+        if _is_llm(observation, "failure_flow") else []
 
     top_mme = entity.get("top_mme", []) if _is_llm(observation, "entity_failure_contribution") else []
     top_enb = entity.get("top_enb", []) if _is_llm(observation, "entity_failure_contribution") else []
@@ -979,6 +1044,61 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             )
         lines.append("")
 
+    if failure_flow:
+        lines.append("## Failure Flow Summary")
+        lines.append("각 장애의 시작점과 종료점을 나타낸다.")
+        lines.append("")
+        for flow in failure_flow:
+            call_type = flow.get("call_type", "-")
+            first_msg = flow.get("first_message", "-")
+            first_cause = flow.get("first_cause", "-")
+            last_msg = flow.get("last_message", "-")
+            last_cause = flow.get("last_cause", "-")
+            count = flow.get("count", 0)
+            is_single = flow.get("is_single_node", False)
+            if is_single:
+                lines.append(
+                    f"- [{call_type}] {first_msg}({first_cause}) "
+                    f"→ (단일 노드 장애) ({count}건)"
+                )
+            else:
+                lines.append(
+                    f"- [{call_type}] {first_msg}({first_cause}) "
+                    f"→ {last_msg}({last_cause}) ({count}건)"
+                )
+        lines.append("")
+
+    # 패턴 그룹화: eNB 집중도 기반
+    ran_patterns = [s for s in shared if s.get("affected_enb_count", 0) <= 2]
+    core_patterns = [s for s in shared if s.get("affected_enb_count", 0) > 2]
+
+    if ran_patterns or core_patterns:
+        lines.append("## 장애 패턴 그룹")
+        lines.append("eNB 집중도 기반으로 사전 분류한 결과다. 최종 판단은 LLM이 수행한다.")
+        lines.append("")
+
+        if ran_patterns:
+            lines.append("### RAN/Access 후보 패턴 (eNB 집중)")
+            for s in ran_patterns:
+                enb_count = s["affected_enb_count"]
+                lines.append(
+                    f"- {s.get('call_type', '-')} / {s.get('interface', '-')} / "
+                    f"{s.get('message', '-')} / {s.get('cause', '-')}: "
+                    f"{s['count']}건, eNB {enb_count}개"
+                )
+            lines.append("")
+
+        if core_patterns:
+            lines.append("### Core Network 후보 패턴 (eNB 분산)")
+            for s in core_patterns:
+                enb_count = s["affected_enb_count"]
+                lines.append(
+                    f"- {s.get('call_type', '-')} / {s.get('interface', '-')} / "
+                    f"{s.get('message', '-')} / {s.get('cause', '-')}: "
+                    f"{s['count']}건, eNB {enb_count}개"
+                )
+            lines.append("")
+
     if error_chains:
         lines.append("## Top Error Chains")
         for row in error_chains[:10]:
@@ -1009,16 +1129,25 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "---",
         "",
         "위 데이터를 기반으로 아래 순서로 분석하세요.",
-        "데이터에 있는 call_type, 장비명, interface, message, stage, cause, 수치를 그대로 인용하세요.",
+        "데이터에 있는 call_type, 장비명, interface, message, cause, 수치를 그대로 인용하세요.",
         "데이터에 없는 값은 생성하지 마세요.",
         "",
-        "## 최종 판단을 먼저 작성하세요:",
-        "- RCA Domain: RAN-side Dominant / Core-side Dominant / Mixed / Unknown 중 하나",
-        "- 신뢰도: High / Medium / Low",
-        "- 판단 근거: [집중] 패턴은 해당 장비/구간 장애, [분산] 패턴은 Core/HSS 장애로 해석하세요.",
+        "## 분석 순서",
+        "1. Failure Flow 분석: 각 Flow의 시작점과 종료점이 의미하는 장애 위치를 설명하세요.",
+        "2. 패턴 그룹화: 위 장애 패턴 그룹(RAN 후보 / Core 후보)의 타당성을 검토하고 필요시 재분류하세요.",
+        "3. 상관관계 분석: 동일 시간대 또는 동일 장비에서 복수 패턴이 겹치는지 분석하세요.",
+        "4. 영향도 평가: 아래 테이블 형식으로 RAN/Core/Subscriber 각각의 영향도를 평가하세요.",
         "",
-        "이후 장애 위치별 분석과 조치 방향을 작성하세요.",
-        "조치 방향은 위 데이터에 있는 장비/인터페이스 기준으로만 작성하세요.",
+        "## 영향도 테이블 (반드시 포함)",
+        "| 구분 | 영향도 | 주요 근거 |",
+        "|---|---|---|",
+        "| RAN/Access | High / Medium / Low | 데이터 기반 근거 |",
+        "| Core Network | High / Medium / Low | 데이터 기반 근거 |",
+        "| Subscriber/UE | High / Medium / Low | 데이터 기반 근거 |",
+        "",
+        "5. 최종 RCA: 영향도가 높은 Domain부터 장애 위치와 조치 방향을 작성하세요.",
+        "   조치 방향은 데이터에 있는 장비/인터페이스 기준으로만 작성하세요.",
+        "   확정할 수 없는 내용은 반드시 '가능성' 또는 '추가 확인 필요'로 표현하세요.",
     ]
 
     return "\n".join(lines)

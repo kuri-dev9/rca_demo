@@ -226,6 +226,7 @@ CALL_TYPE_MAP: Dict[int, str] = {
     8: "Extended_Service_MT",
     9: "Detach_MO",
     10: "S1_Handover_Inter_MME",
+    11: "Reroute"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────

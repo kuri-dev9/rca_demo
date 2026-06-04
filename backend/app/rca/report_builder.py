@@ -748,42 +748,22 @@ Markdown을 사용하고, HTML은 사용하지 않습니다."""
 
 def build_gemma4_system_prompt() -> str:
     return """\
-당신은 LTE/EPC RCA 분석 엔진이다.
+당신은 LTE/EPC 네트워크 장애 분석 전문가다.
+3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
 
-반드시 입력 데이터만 사용한다.
-반드시 한국어로 작성한다.
-3GPP 표준 문서 기반으로만 추론한다.
-반드시 아래 Markdown 구조만 출력한다.
+역할:
+- 입력 데이터의 interface / stage / cause 조합으로 장애 발생 위치를 특정한다.
+- 장애 위치별로 3GPP 절차상 어느 노드, 어느 단계에서 문제가 발생했는지 설명한다.
+- 근거 있는 조치 방향을 제시한다.
 
-## 최종 RCA
-
-| 항목 | 값 |
-|---|---|
-| 판단 | Network-side Dominant 또는 Subscriber-side Dominant 또는 Mixed 또는 Unknown |
-| 신뢰도 | High 또는 Medium 또는 Low |
-
-## 판단 근거
-
-### Network-side 근거
-
-### Subscriber-side 근거
-
-### 반대 근거 또는 제한 사항
-
-## 우선 확인 대상
-
-- 우선 점검 장비:
-- 우선 점검 Interface:
-- 우선 점검 IMSI:
-- 추가 확인 필요 데이터:
-
-중요:
-- Classification 출력 금지
-- Reasoning 출력 금지
-- Conclusion 출력 금지
-- Summary 출력 금지
-- 위 Markdown 구조 이외의 제목 생성 금지
-- 출력 첫 줄은 반드시 `## 최종 RCA` 로 시작한다."""
+반드시 지킬 것:
+- 입력 데이터에 없는 장비, IMSI, Cause, Interface, Stage 이름을 생성하지 않는다.
+- Cause / Interface / Stage 이름을 임의로 변경하거나 번역하지 않는다.
+  예: UE_not_responding → UE_not_responding (변경 금지)
+  예: S11_GTPv2C → S11_GTPv2C (변경 금지)
+- 입력 데이터에 없는 수치를 생성하지 않는다.
+- 반드시 한국어로 작성한다.
+"""
 
 
 def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[dict[str, str]]:
@@ -836,13 +816,22 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
 - 추가 확인 필요 데이터:
 """
     if is_gemma:
-        user += """\
+        user += """
 
-중요:
-- 반드시 ## 최종 RCA 로 시작하세요.
-- 위 출력 형식을 정확히 준수하세요.
-- Classification:, Reasoning:, Conclusion:, Summary: 헤더는 절대 사용하지 마세요.
-- 위 Markdown 구조 이외의 섹션 헤더를 추가하지 마세요.
+분석 시 아래 순서로 작성하세요:
+
+1. 최종 판단
+   - Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나
+   - 신뢰도: High / Medium / Low
+
+2. 장애 위치 분석
+   - 각 interface + stage + cause 조합이 3GPP 절차상 어느 노드 간 구간에서 발생한 것인지 설명
+   - 집중도가 높은 장비(MME/eNB/SGW)와 해당 장비에서 반복되는 패턴 설명
+
+3. 조치 방향
+   - 장애 위치별로 확인해야 할 사항
+   - 입력 데이터에 근거한 항목만 작성
+   - 추측성 권고 금지
 """
 
     return [

@@ -189,7 +189,9 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             "failure_count": analysis.failure_count,
             "failure_rate": round(analysis.failure_rate, 2),
         },
-        "interface_failure_distribution": dict(analysis.interface_distribution),
+        # 아래 두 항목은 shared_failure_observations로 커버되므로 off
+        # "interface_failure_distribution": dict(analysis.interface_distribution),
+        # "failure_stage_distribution": dict(stage_counter),
         "call_type_failure_summary": {
             ct: {
                 "failure_rate": analysis.call_type_failure_rate.get(ct, 0),
@@ -198,8 +200,8 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             for ct, cnt in analysis.call_type_distribution.items()
             if analysis.call_type_failure_rate.get(ct, 0) > 0
         },
-        "failure_stage_distribution": dict(stage_counter),
-        "representative_chains": rep_chains,
+        # representative_chains는 error_chains + shared_failure_observations로 커버되므로 off
+        # "representative_chains": rep_chains,
         "error_chains": analysis.error_chains,
         "entity_failure_contribution": {
             "top_mme": analysis.entity_failure_contributions.get("mme", []),
@@ -705,9 +707,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     # 통계
     lines += [
         "## 장애 통계",
-        f"- 시도: {stats.get('attempt_count', 0):,}건",
-        f"- 실패: {stats.get('failure_count', 0):,}건",
-        f"- 실패율: {stats.get('failure_rate', 0)}%",
+        f"- 실패: {stats.get('failure_count', 0):,}건 / 시도: {stats.get('attempt_count', 0):,}건",
         "",
     ]
 
@@ -755,14 +755,17 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     if shared:
         lines.append("## 반복 장애 패턴")
         for s in shared:
+            enb_count = s['affected_enb_count']
+            # eNB 집중도: 1~2개면 집중, 그 이상이면 분산
+            enb_label = "[집중]" if enb_count <= 2 else "[분산]"
             lines.append(
                 f"- {s.get('call_type', '-')} / {s['interface']} / "
                 f"{s.get('message', '-')} / {s['stage']} / {s['cause']}: "
                 f"{s['count']}건, "
                 f"영향 IMSI {s['affected_imsi_count']}명, "
                 f"MME {s['affected_mme_count']}개, "
-                f"eNB {s['affected_enb_count']}개"
-        )
+                f"eNB {enb_count}개 {enb_label}"
+            )
         lines.append("")
 
     if error_chains:
@@ -806,8 +809,13 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "주요 절차는 입력에 있는 call_type만 사용하세요.",
         "Classification, Reasoning, Conclusion, Summary 제목은 사용하지 마세요.",
         "",
-        "## 최종 RCA 테이블을 먼저 작성하고, 이후 장애 위치 분석과 조치 방향을 작성하세요.",
-        "섹션 제목은 자유롭게 사용해도 됩니다.",
+        "## 최종 판단을 먼저 작성하세요:",
+        "- RCA Domain: RAN-side Dominant / Core-side Dominant / Mixed / Unknown 중 하나",
+        "- 신뢰도: High / Medium / Low",
+        "- 판단 근거: [집중] 패턴은 해당 장비/구간 장애, [분산] 패턴은 Core/HSS 장애로 해석하세요.",
+        "",
+        "이후 장애 위치별 분석과 조치 방향을 작성하세요.",
+        "조치 방향은 위 데이터에 있는 장비/인터페이스 기준으로만 작성하세요.",
     ]
 
     return "\n".join(lines)

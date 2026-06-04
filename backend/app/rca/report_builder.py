@@ -681,6 +681,14 @@ def build_gemma4_system_prompt() -> str:
 반드시 한국어로 작성한다.
 반드시 아래 Markdown 구조만 출력한다.
 
+분석 우선순위
+1. Top Error Chains
+2. 반복 장애 패턴
+3. MME/eNB 장애 기여
+4. 가입자 요약
+
+위 순서로 RCA를 수행하라.
+
 ## 최종 RCA
 
 | 항목 | 값 |
@@ -701,12 +709,7 @@ def build_gemma4_system_prompt() -> str:
 ### 조치 방향
 
 중요:
-- Classification 출력 금지
-- Reasoning 출력 금지
-- Conclusion 출력 금지
-- Summary 출력 금지
-- 위 Markdown 구조 이외의 제목 생성 금지
-- 출력 첫 줄은 반드시 `## 최종 RCA` 로 시작한다."""
+- 지정된 섹션 외의 추가 섹션을 생성하지 마라."""
 
 
 def _format_gemma_user_message(observation: dict[str, Any]) -> str:

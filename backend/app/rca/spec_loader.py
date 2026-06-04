@@ -235,6 +235,8 @@ CALL_TYPE_MAP: Dict[int, str] = {
 # 로딩된 딕셔너리 (앱 시작 시 한번 초기화)
 MESSAGE_CODE_MAP: Dict[Tuple[str, int], str] = {}   # (interface_name, code) → message_name
 CAUSE_MAP: Dict[Tuple[str, int], Dict[str, str]] = {}  # (protocol, code) → {meaning, description}
+MESSAGE_CODE_RANGE_MAP: list[tuple[str, int, int, str]] = []
+CAUSE_RANGE_MAP: list[tuple[str, int, int, str]] = []
 
 # NAS EMM / NAS ESM 메시지 코드 (XDR_MessageCode_v0.6.xlsx 기반)
 NAS_EMM_MSG = {
@@ -748,6 +750,31 @@ _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
+def _seed_static_ranges() -> None:
+    for protocol in ("S6a_Diameter", "S13_Diameter"):
+        for start, end, name in [
+            (263, 264, "Unassigned"),
+            (266, 267, "Unassigned"),
+            (269, 270, "Unassigned"),
+            (276, 279, "Unassigned"),
+            (289, 299, "Unassigned"),
+            (331, 8388607, "Unassigned"),
+            (8388726, 16777213, "Unassigned"),
+        ]:
+            MESSAGE_CODE_RANGE_MAP.append((protocol, start, end, name))
+        for start, end, name in [
+            (0, 999, "Reserved"),
+            (1002, 1999, "Unassigned"),
+            (2010, 2999, "Unassigned"),
+            (3012, 3999, "Unassigned"),
+            (4015, 4999, "Unassigned"),
+            (5019, 5023, "Unassigned"),
+            (5026, 5029, "Unassigned"),
+            (5049, 4294967295, "Unassigned"),
+        ]:
+            CAUSE_RANGE_MAP.append((protocol, start, end, name))
+
+
 def _normalize_spec_name(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -770,6 +797,29 @@ def _parse_int(value: Any) -> Optional[int]:
             return int(float(text))
         except ValueError:
             return None
+
+
+def _parse_int_range(value: Any) -> Optional[tuple[int, int]]:
+    text = str(value or "").strip()
+    if "-" not in text:
+        return None
+    start_text, end_text = (part.strip() for part in text.split("-", 1))
+    start = _parse_int(start_text)
+    end = _parse_int(end_text)
+    if start is None or end is None or start > end:
+        return None
+    return start, end
+
+
+def _lookup_range(
+    ranges: list[tuple[str, int, int, str]],
+    protocol: str,
+    code: int,
+) -> Optional[str]:
+    for item_protocol, start, end, name in ranges:
+        if item_protocol == protocol and start <= code <= end:
+            return name
+    return None
 
 
 def _xlsx_col_index(cell_ref: str) -> int:
@@ -844,8 +894,14 @@ def _find_xdr_xlsx(filename: str) -> Optional[Path]:
 
 
 def _add_message(protocols: list[str], code: Any, name: Any) -> None:
-    code_int = _parse_int(code)
     normalized = _normalize_spec_name(name)
+    code_range = _parse_int_range(code)
+    if code_range and normalized:
+        start, end = code_range
+        for protocol in protocols:
+            MESSAGE_CODE_RANGE_MAP.append((protocol, start, end, normalized))
+        return
+    code_int = _parse_int(code)
     if code_int is None or not normalized:
         return
     for protocol in protocols:
@@ -853,8 +909,14 @@ def _add_message(protocols: list[str], code: Any, name: Any) -> None:
 
 
 def _add_cause(protocols: list[str], code: Any, meaning: Any, description: Any = "") -> None:
-    code_int = _parse_int(code)
     normalized = _normalize_spec_name(meaning)
+    code_range = _parse_int_range(code)
+    if code_range and normalized:
+        start, end = code_range
+        for protocol in protocols:
+            CAUSE_RANGE_MAP.append((protocol, start, end, normalized))
+        return
+    code_int = _parse_int(code)
     if code_int is None or not normalized:
         return
     for protocol in protocols:
@@ -941,6 +1003,7 @@ def _load_dynamic_specs() -> None:
         logger.warning("Failed to load XDR spec mappings: %s", exc)
 
 
+_seed_static_ranges()
 _load_dynamic_specs()
 
 
@@ -955,6 +1018,9 @@ def get_message_name(interface_code: int, msg_code: int) -> str:
     dynamic_name = MESSAGE_CODE_MAP.get((iface, msg_code))
     if dynamic_name:
         return dynamic_name
+    dynamic_range_name = _lookup_range(MESSAGE_CODE_RANGE_MAP, iface, msg_code)
+    if dynamic_range_name:
+        return dynamic_range_name
 
     if "S6a" in iface or "S13" in iface:
         return DIAMETER_MSG.get(msg_code, f"DIAMETER_MSG_{msg_code}")
@@ -980,6 +1046,9 @@ def get_cause_name(interface_code: int, cause_code: int) -> str:
     dynamic_cause = CAUSE_MAP.get((iface, cause_code))
     if dynamic_cause:
         return dynamic_cause.get("meaning") or dynamic_cause.get("name") or f"CAUSE_{cause_code}"
+    dynamic_range_cause = _lookup_range(CAUSE_RANGE_MAP, iface, cause_code)
+    if dynamic_range_cause:
+        return dynamic_range_cause
 
     if "S6a" in iface or "S13" in iface:
         name = DIAMETER_CAUSE_MAP.get(cause_code)

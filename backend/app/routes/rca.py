@@ -33,6 +33,7 @@ from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
     build_rca_messages,
+    build_report_prompt_from_reasoning,
     build_loop_reasoning_steps,
     build_reasoning_messages,
 )
@@ -428,7 +429,15 @@ async def stream_rca_report(
     except Exception:
         raise HTTPException(status_code=422, detail="RCA 컨텍스트 파싱 실패")
 
-    messages = build_rca_messages(context, conv.model or RCA_MODEL)
+    # reasoning이 이미 있으면 report 렌더링 경로, 없으면 일반 RCA 판단 경로
+    rca_reasoning = context.get("rca_reasoning") if isinstance(context, dict) else None
+    compact_rca_ir = context.get("compact_rca_ir", context) if isinstance(context, dict) else context
+
+    if rca_reasoning:
+        messages = build_report_prompt_from_reasoning(compact_rca_ir, rca_reasoning)
+    else:
+        messages = build_rca_messages(context, conv.model or RCA_MODEL)
+
     logger.debug("rca report prompt chars=%s", sum(len(m["content"]) for m in messages))
 
     async def generate():

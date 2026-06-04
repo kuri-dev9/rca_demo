@@ -752,8 +752,8 @@ def build_gemma4_system_prompt() -> str:
 
 반드시 입력 데이터만 사용한다.
 반드시 한국어로 작성한다.
-반드시 아래 Markdown 구조만 출력한다.
 3GPP 표준 문서 기반으로만 추론한다.
+반드시 아래 Markdown 구조만 출력한다.
 
 ## 최종 RCA
 
@@ -801,7 +801,7 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
     is_gemma = "gemma" in (model_name or "").lower()
     system = build_gemma4_system_prompt() if is_gemma else build_default_system_prompt()
 
-    ctx_json = json.dumps(observation, ensure_ascii=False, indent=2)
+    ctx_json = json.dumps(observation, ensure_ascii=False, separators=(',', ':'))
     user = f"""\
 다음 xDR 관측 데이터를 분석하여 RCA 판단 결과를 한국어로 작성하세요.
 

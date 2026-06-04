@@ -750,22 +750,108 @@ def build_gemma4_system_prompt() -> str:
     return """\
 당신은 LTE/EPC 네트워크 장애 분석 전문가다.
 3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
-
-역할:
-- 입력 데이터의 interface / stage / cause 조합으로 3GPP 절차상 장애 발생 위치를 특정한다.
-- 장애 위치별로 어느 노드 간 구간에서 문제가 발생했는지 설명한다.
-- 데이터에 근거한 조치 방향을 제시한다.
-
-반드시 지킬 것:
-- 분석 결과에 입력 데이터의 값을 반드시 직접 인용한다.
-  예: entity_id → "MME 47", "eNB bo3reaGROYftluYm2HmjZQ=="
-  예: cause → "UE_not_responding", "VENDOR_SPECIFIC_CAUSE_15001" (번역/변경 금지)
-  예: interface → "S11_GTPv2C", "S6a_Diameter" (번역/변경 금지)
-  예: 수치 → failure_contribution_pct, count 등을 그대로 인용
-- 입력 데이터에 없는 장비, IMSI, Cause, Interface, Stage를 생성하지 않는다.
-- 입력 데이터에 없는 수치를 생성하지 않는다.
-- 반드시 한국어로 작성한다.
+아래 제공된 데이터를 기반으로 장애 위치를 특정하고 조치 방향을 제시한다.
+반드시 한국어로 작성한다.
 """
+
+
+def _format_gemma_user_message(observation: dict[str, Any]) -> str:
+    stats = observation.get("statistics", {})
+    entity = observation.get("entity_failure_contribution", {})
+    shared = observation.get("shared_failure_observations", [])
+    subscriber = observation.get("subscriber_summary", {})
+
+    lines = []
+
+    # 통계
+    lines += [
+        "## 장애 통계",
+        f"- 시도: {stats.get('attempt_count', 0):,}건",
+        f"- 실패: {stats.get('failure_count', 0):,}건",
+        f"- 실패율: {stats.get('failure_rate', 0)}%",
+        "",
+    ]
+
+    # MME
+    top_mme = entity.get("top_mme", [])
+    if top_mme:
+        lines.append("## MME 장애 기여")
+        for mme in top_mme:
+            lines.append(
+                f"- MME {mme['entity_id']}: "
+                f"{mme['failures']}건 실패, 기여율 {mme['failure_contribution_pct']}%"
+            )
+            for p in mme.get("top_failure_patterns", []):
+                lines.append(
+                    f"  - {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
+                )
+        lines.append("")
+
+    # eNB
+    top_enb = entity.get("top_enb", [])
+    if top_enb:
+        lines.append("## eNB 장애 기여")
+        for enb in top_enb:
+            lines.append(
+                f"- eNB {enb['entity_id']}: "
+                f"{enb['failures']}건 실패 (성공 {enb['success']}건), 기여율 {enb['failure_contribution_pct']}%"
+            )
+            for p in enb.get("top_failure_patterns", []):
+                lines.append(
+                    f"  - {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
+                )
+        lines.append("")
+
+    # 반복 패턴
+    if shared:
+        lines.append("## 반복 장애 패턴")
+        for s in shared:
+            lines.append(
+                f"- {s['interface']} / {s['stage']} / {s['cause']}: "
+                f"{s['count']}건, "
+                f"영향 IMSI {s['affected_imsi_count']}명, "
+                f"MME {s['affected_mme_count']}개, "
+                f"eNB {s['affected_enb_count']}개"
+            )
+        lines.append("")
+
+    # 가입자 요약
+    if subscriber:
+        lines += [
+            "## 가입자 요약",
+            f"- 영향 IMSI: {subscriber.get('affected_imsi_count', 0):,}명",
+            f"- 반복 실패 IMSI: {subscriber.get('repeated_failure_imsi_count', 0)}명 "
+            f"({subscriber.get('repeated_failure_ratio', 0)}%)",
+            f"- Zero Success IMSI: {subscriber.get('zero_success_imsi_count', 0)}명",
+            f"- Top IMSI Failure Share: {subscriber.get('top_imsi_failure_share', 0)}%",
+            "",
+        ]
+
+    # 분석 지시
+    lines += [
+        "---",
+        "",
+        "위 데이터를 기반으로 아래 순서로 분석하세요.",
+        "데이터에 있는 장비명, interface, stage, cause, 수치를 그대로 인용하세요.",
+        "데이터에 없는 값은 생성하지 마세요.",
+        "",
+        "## 최종 판단",
+        "- 판단: Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나",
+        "- 신뢰도: High / Medium / Low 중 하나",
+        "- 근거: 위 데이터 기준 핵심 근거 2~3문장",
+        "",
+        "## 장애 위치 분석",
+        "각 반복 패턴(interface / stage / cause)에 대해:",
+        "- 3GPP 절차상 어느 노드 간 구간인지",
+        "- 해당 cause의 의미와 장애 발생 지점",
+        "- 집중된 장비(위 데이터의 entity_id 직접 인용)와의 연관성",
+        "",
+        "## 조치 방향",
+        "- [장비 또는 인터페이스]: 확인 항목",
+        "- 위 데이터에 근거한 항목만 작성",
+    ]
+
+    return "\n".join(lines)
 
 
 def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[dict[str, str]]:
@@ -781,8 +867,14 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
             if k not in {"subscriber_cause_distribution", "subscriber_plmn_distribution"}
         }
     is_gemma = "gemma" in (model_name or "").lower()
-    system = build_gemma4_system_prompt() if is_gemma else build_default_system_prompt()
 
+    if is_gemma:
+        return [
+            {"role": "system", "content": build_gemma4_system_prompt()},
+            {"role": "user", "content": _format_gemma_user_message(observation)},
+        ]
+
+    system = build_default_system_prompt()
     ctx_json = json.dumps(observation, ensure_ascii=False, separators=(',', ':'))
     user = f"""\
 다음 xDR 관측 데이터를 분석하여 RCA 판단 결과를 한국어로 작성하세요.
@@ -817,31 +909,6 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
 - 우선 점검 IMSI:
 - 추가 확인 필요 데이터:
 """
-    if is_gemma:
-        user += """
-
-아래 순서로 작성하세요.
-각 항목에 입력 데이터의 값(entity_id, interface, stage, cause, 수치)을 반드시 직접 인용하세요.
-
-## 최종 판단
-- 판단: Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나
-- 신뢰도: High / Medium / Low 중 하나
-- 판단 요약: 2~3문장으로 핵심 근거만 서술
-
-## 장애 위치 분석
-
-각 interface + stage + cause 조합에 대해:
-- 3GPP 절차상 어느 노드 간 구간인지
-- 해당 cause의 의미와 장애 발생 지점
-- 집중도가 높은 장비(entity_id 직접 인용)에서 반복되는 패턴
-
-## 조치 방향
-
-장애 위치별 확인 사항을 아래 형식으로 작성:
-- [장비/인터페이스]: 확인 항목
-입력 데이터에 근거한 항목만 작성할 것.
-"""
-
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

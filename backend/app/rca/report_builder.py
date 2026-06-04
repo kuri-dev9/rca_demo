@@ -130,6 +130,7 @@ def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> lis
             "call_type_code": row.get("call_type_code"),
             "call_type": row.get("call_type"),
             "interface": row.get("interface"),
+            "message": row.get("message"),
             "stage": row.get("stage"),
             "cause": row.get("cause"),
             "count": row.get("count"),
@@ -155,6 +156,7 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             "call_type": get_call_type_name(chain.call_type),
             "procedure": chain.procedure,
             "interface": chain.failure_interface,
+            "message": chain.failure_message,
             "failure_point": chain.failure_point,
             "cause": chain.failure_cause_name,
         }
@@ -192,6 +194,7 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
         "call_type_failure_rate": analysis.call_type_failure_rate,
         "failure_stage_distribution": dict(stage_counter),
         "representative_chains": rep_chains,
+        "error_chains": analysis.error_chains,
         "entity_failure_contribution": {
             "top_mme": analysis.entity_failure_contributions.get("mme", []),
             "top_enb": analysis.entity_failure_contributions.get("enb", []),
@@ -218,8 +221,11 @@ def build_compact_reasoning_json(observability: dict[str, Any]) -> dict[str, Any
     rep_chains = []
     for chain in observability.get("representative_chains", [])[:10]:
         rep_chains.append({
+            "call_type_code": chain.get("call_type_code"),
+            "call_type": chain.get("call_type"),
             "procedure": chain.get("procedure"),
             "interface": chain.get("interface"),
+            "message": chain.get("message"),
             "failure_point": chain.get("failure_point"),
             "cause": chain.get("cause"),
         })
@@ -231,7 +237,10 @@ def build_compact_reasoning_json(observability: dict[str, Any]) -> dict[str, Any
     )[:10]
     shared = [
         {
+            "call_type_code": row.get("call_type_code"),
+            "call_type": row.get("call_type"),
             "interface": row.get("interface"),
+            "message": row.get("message"),
             "stage": row.get("stage"),
             "cause": row.get("cause"),
             "count": row.get("count"),
@@ -265,6 +274,7 @@ def build_compact_reasoning_json(observability: dict[str, Any]) -> dict[str, Any
         "interface_failure_distribution": observability.get("interface_failure_distribution", {}),
         "failure_stage_distribution": observability.get("failure_stage_distribution", {}),
         "representative_chains": rep_chains,
+        "error_chains": observability.get("error_chains", []),
         "mme_baseline": mme_baseline,
         "critical_enb": _critical_enb(observability.get("enb_baseline", [])),
         "shared_failure_observations": shared,
@@ -618,9 +628,12 @@ def build_report_prompt_from_reasoning(
         k: compact_rca_ir.get(k)
         for k in (
             "statistics",
+            "call_type_distribution",
             "interface_failure_distribution",
             "failure_stage_distribution",
             "entity_failure_contribution",
+            "shared_failure_observations",
+            "error_chains",
             "subscriber_summary",
             "burst_detected",
         )
@@ -702,6 +715,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     shared = observation.get("shared_failure_observations", [])
     subscriber = observation.get("subscriber_summary", {})
     call_type_dist = observation.get("call_type_distribution", {})
+    error_chains = observation.get("error_chains", [])
 
     lines = []
 
@@ -731,7 +745,8 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             )
             for p in mme.get("top_failure_patterns", []):
                 lines.append(
-                    f"  - {p.get('call_type', '-')} / {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
+                    f"  - {p.get('call_type', '-')} / {p['interface']} / "
+                    f"{p.get('message', '-')} / {p['stage']} / {p['cause']}: {p['count']}건"
                 )
         lines.append("")
 
@@ -746,7 +761,8 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             )
             for p in enb.get("top_failure_patterns", []):
                 lines.append(
-                    f"  - {p.get('call_type', '-')} / {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
+                    f"  - {p.get('call_type', '-')} / {p['interface']} / "
+                    f"{p.get('message', '-')} / {p['stage']} / {p['cause']}: {p['count']}건"
                 )
         lines.append("")
 
@@ -755,11 +771,25 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         lines.append("## 반복 장애 패턴")
         for s in shared:
             lines.append(
-                f"- {s.get('call_type', '-')} / {s['interface']} / {s['stage']} / {s['cause']}: "
+                f"- {s.get('call_type', '-')} / {s['interface']} / "
+                f"{s.get('message', '-')} / {s['stage']} / {s['cause']}: "
                 f"{s['count']}건, "
                 f"영향 IMSI {s['affected_imsi_count']}명, "
                 f"MME {s['affected_mme_count']}개, "
                 f"eNB {s['affected_enb_count']}개"
+        )
+        lines.append("")
+
+    if error_chains:
+        lines.append("## Top Error Chains")
+        for row in error_chains[:10]:
+            first = row.get("first_error", {})
+            last = row.get("last_error", {})
+            lines.append(
+                f"- {row.get('call_type', '-')}: "
+                f"First {first.get('interface', '-')} / {first.get('message', '-')} / {first.get('cause', '-')} "
+                f"→ Last {last.get('interface', '-')} / {last.get('message', '-')} / {last.get('cause', '-')} "
+                f"({row.get('count', 0)}건)"
             )
         lines.append("")
 
@@ -780,7 +810,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "---",
         "",
         "위 데이터를 기반으로 아래 순서로 분석하세요.",
-        "데이터에 있는 call_type, 장비명, interface, stage, cause, 수치를 그대로 인용하세요.",
+        "데이터에 있는 call_type, 장비명, interface, message, stage, cause, 수치를 그대로 인용하세요.",
         "데이터에 없는 값은 생성하지 마세요.",
         "",
         "출력 첫 줄은 반드시 `## 최종 RCA` 로 시작하세요.",

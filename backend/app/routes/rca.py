@@ -81,7 +81,9 @@ def _append_entity_contribution_section(lines: list[str], title: str, rows: list
     for row in rows:
         patterns = row.get("top_failure_patterns", [])
         pattern_text = ", ".join(
-            f"{p.get('call_type') or '-'} / {p.get('cause')}({p.get('count')})"
+            f"{p.get('call_type') or '-'} / {p.get('interface') or '-'} / "
+            f"{p.get('message') or '-'} / {p.get('stage') or '-'} / "
+            f"{p.get('cause')}({p.get('count')})"
             for p in patterns
             if p.get("cause") and p.get("count") is not None
         ) or "-"
@@ -244,17 +246,40 @@ def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
 
     _append_subscriber_summary_section(lines, analysis)
 
+    if analysis.error_chains:
+        lines += [
+            " ",
+            "### Top Error Chains",
+            "| Call Type | First Error | Last Error | Count |",
+            "|---|---|---|---:|",
+        ]
+        for row in analysis.error_chains[:8]:
+            first = row.get("first_error", {})
+            last = row.get("last_error", {})
+            first_text = (
+                f"{first.get('interface') or '-'} / {first.get('message') or '-'} / "
+                f"{first.get('cause') or '-'}"
+            )
+            last_text = (
+                f"{last.get('interface') or '-'} / {last.get('message') or '-'} / "
+                f"{last.get('cause') or '-'}"
+            )
+            lines.append(
+                f"| {row.get('call_type') or '-'} | {first_text} | {last_text} | {row.get('count', 0):,} |"
+            )
+
     # Shared Failure Observations
     if analysis.shared_failure_signatures:
         lines += [
             " ",
             "### 유형별 실패 통계",
-            "| Call Type | Interface | Stage | Cause | Count | IMSI | MME | eNB |",
-            "|---|---|---|---|---|---|---|---|",
+            "| Call Type | Interface | Message | Stage | Cause | Count | IMSI | MME | eNB |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
         for s in analysis.shared_failure_signatures[:8]:
             lines.append(
-                f"| {s.get('call_type') or '-'} | {s['interface']} | {s['stage']} | {s['cause']} "
+                f"| {s.get('call_type') or '-'} | {s['interface']} | {s.get('message') or '-'} "
+                f"| {s['stage']} | {s['cause']} "
                 f"| {s['count']} | {s['affected_imsi_count']} "
                 f"| {s['affected_mme_count']} | {s['affected_enb_count']} |"
             )
@@ -295,6 +320,7 @@ def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]
         "top_root_causes": [],
         "recommended_actions": [],
         "failure_chains": chains_raw,
+        "error_chains": analysis.error_chains,
         "impacted_nodes": {
             "mme_count": len(analysis.affected_mme_ids),
             "enb_count": len(analysis.affected_enb_ids),

@@ -16,7 +16,7 @@ from app.rca.chain_builder import FailureChain, build_failure_chain
 from app.rca.normalizer import NormalizedEvent, normalize_record
 from app.rca.parser import XdrRecord
 from app.rca.procedures import get_procedure_name
-from app.rca.spec_loader import get_call_type_name, get_cause_name, get_interface_name
+from app.rca.spec_loader import get_call_type_name, get_cause_name, get_interface_name, get_message_name
 
 # Interface / message code constants (mirrors chain_builder.py)
 _IFACE_S6A   = 1
@@ -106,6 +106,7 @@ class RcaAnalysis:
 
     # Shared failure signatures: same (interface, stage, cause) across multiple devices/IMSIs
     shared_failure_signatures: List[Dict[str, Any]] = field(default_factory=list)
+    error_chains: List[Dict[str, Any]] = field(default_factory=list)
     entity_failure_contributions: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     subscriber_cause_distribution: List[Dict[str, Any]] = field(default_factory=list)
     subscriber_plmn_distribution: List[Dict[str, Any]] = field(default_factory=list)
@@ -440,6 +441,7 @@ def _entity_failure_contributions(
             "call_type_code": call_type_code,
             "call_type": get_call_type_name(call_type_code),
             "interface": get_interface_name(fi),
+            "message": get_message_name(fi, fm),
             "stage": _interface_msg_to_stage(fi, fm),
             "cause": get_cause_name(fi, fc),
             "count": int(row["len"]),
@@ -698,6 +700,7 @@ def analyze(records: pl.LazyFrame | pl.DataFrame | List[XdrRecord], parse_stats:
     mme_baseline: list = []
     enb_baseline: list = []
     shared_failure_signatures: list = []
+    error_chains: list = []
     entity_failure_contributions: dict[str, list] = {"mme": [], "enb": [], "sgw": []}
     subscriber_cause_distribution: list = []
     subscriber_plmn_distribution: list = []
@@ -802,6 +805,7 @@ def analyze(records: pl.LazyFrame | pl.DataFrame | List[XdrRecord], parse_stats:
                 "call_type_code": call_type_code,
                 "call_type": get_call_type_name(call_type_code),
                 "interface": get_interface_name(fi),
+                "message": get_message_name(fi, fm),
                 "stage": _interface_msg_to_stage(fi, fm),
                 "cause": get_cause_name(fi, fc),
                 "count": row["count"],
@@ -810,6 +814,48 @@ def analyze(records: pl.LazyFrame | pl.DataFrame | List[XdrRecord], parse_stats:
                 "affected_enb_count": row["affected_enb_count"],
             })
         del sig_df
+
+        error_chain_df = (
+            failure_lf
+            .filter(pl.col("first_error_interface") != 0)
+            .group_by([
+                "call_type",
+                "first_error_interface",
+                "first_error_message",
+                "first_error_cause",
+                "last_error_interface",
+                "last_error_message",
+                "last_error_cause",
+            ])
+            .len()
+            .sort("len", descending=True)
+            .head(10)
+            .collect()
+        )
+        for row in error_chain_df.iter_rows(named=True):
+            call_type_code = int(row["call_type"] or 0)
+            first_i = int(row["first_error_interface"] or 0)
+            first_m = int(row["first_error_message"] or 0)
+            first_c = int(row["first_error_cause"] or 0)
+            last_i = int(row["last_error_interface"] or 0)
+            last_m = int(row["last_error_message"] or 0)
+            last_c = int(row["last_error_cause"] or 0)
+            error_chains.append({
+                "call_type_code": call_type_code,
+                "call_type": get_call_type_name(call_type_code),
+                "first_error": {
+                    "interface": get_interface_name(first_i),
+                    "message": get_message_name(first_i, first_m),
+                    "cause": get_cause_name(first_i, first_c),
+                },
+                "last_error": {
+                    "interface": get_interface_name(last_i),
+                    "message": get_message_name(last_i, last_m),
+                    "cause": get_cause_name(last_i, last_c),
+                },
+                "count": int(row["len"]),
+            })
+        del error_chain_df
 
         entity_failure_contributions = {
             "mme": _entity_failure_contributions(
@@ -876,6 +922,7 @@ def analyze(records: pl.LazyFrame | pl.DataFrame | List[XdrRecord], parse_stats:
         mme_baseline=mme_baseline,
         enb_baseline=enb_baseline,
         shared_failure_signatures=shared_failure_signatures,
+        error_chains=error_chains,
         entity_failure_contributions=entity_failure_contributions,
         subscriber_cause_distribution=subscriber_cause_distribution,
         subscriber_plmn_distribution=subscriber_plmn_distribution,

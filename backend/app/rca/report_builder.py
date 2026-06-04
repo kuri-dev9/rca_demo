@@ -142,6 +142,78 @@ def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> lis
     ]
 
 
+def _build_rca_hints(
+    analysis: RcaAnalysis,
+    shared: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Backend 계산 가능한 관찰 사실만 정리.
+    영향도/원인/판단 확정은 하지 않음 — LLM이 해석.
+    """
+    total = analysis.failure_count or 1
+
+    # 패턴 건수: eNB 집중도 기반 RAN/Core 후보 분류
+    ran_count = sum(s["count"] for s in shared if s.get("affected_enb_count", 0) <= 2)
+    core_count = sum(s["count"] for s in shared if s.get("affected_enb_count", 0) > 2)
+
+    # 집중 장애 eNB: success=0 이거나 failure_contribution_pct 상위
+    critical_enb = [
+        {
+            "entity_id": e["entity_id"],
+            "failures": e["failures"],
+            "success": e["success"],
+            "failure_contribution_pct": e["failure_contribution_pct"],
+        }
+        for e in analysis.entity_failure_contributions.get("enb", [])
+        if e.get("success", 1) == 0 or e.get("failure_contribution_pct", 0) >= 20.0
+    ]
+
+    # 가입자 분포
+    mobility = analysis.subscriber_mobility_summary or {}
+    affected = int(mobility.get("affected_imsi_count") or 0) or 1
+    repeated = int(mobility.get("repeated_failure_imsi_count") or 0)
+    repeated_ratio = round(repeated / affected * 100, 1)
+
+    # 실패율 높은 절차 (5% 이상만)
+    high_failure_rate_procedures = {
+        ct: rate
+        for ct, rate in analysis.call_type_failure_rate.items()
+        if rate >= 5.0
+    }
+
+    # MME 기여율 상위
+    top_mme = [
+        {
+            "entity_id": e["entity_id"],
+            "failures": e["failures"],
+            "failure_contribution_pct": e["failure_contribution_pct"],
+        }
+        for e in analysis.entity_failure_contributions.get("mme", [])
+    ]
+
+    return {
+        "pattern_counts": {
+            "ran_candidate_count": ran_count,
+            "ran_candidate_pct": round(ran_count / total * 100, 1),
+            "core_candidate_count": core_count,
+            "core_candidate_pct": round(core_count / total * 100, 1),
+            "note": "eNB 집중도 기반 사전 분류. 최종 판단은 LLM이 수행.",
+        },
+        "concentration": {
+            "critical_enb": critical_enb,
+            "note": "success=0 또는 기여율 20% 이상 eNB.",
+        },
+        "subscriber": {
+            "repeated_failure_ratio": repeated_ratio,
+            "affected_imsi_count": affected,
+            "repeated_failure_imsi_count": repeated,
+            "note": "반복 실패 비율과 집중도 기반으로 LLM이 영향도 판단.",
+        },
+        "high_failure_rate_procedures": high_failure_rate_procedures,
+        "top_mme": top_mme,
+    }
+
+
 def _build_failure_flow(error_chains: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     error_chains의 first_error → last_error를
@@ -211,6 +283,7 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             if analysis.failure_count else 0.0
         )
     subscriber_patterns = _subscriber_failure_patterns_from_sequences(analysis.top_failed_imsi_sequences)
+    shared_data = _compact_shared_failures(analysis.shared_failure_signatures)
     return {
         "statistics": {
             "llm": True,
@@ -270,7 +343,11 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
         },
         "shared_failure_observations": {
             "llm": True,
-            "data": _compact_shared_failures(analysis.shared_failure_signatures),
+            "data": shared_data,
+        },
+        "rca_hints": {
+            "llm": True,
+            "data": _build_rca_hints(analysis, shared_data),
         },
         "subscriber_summary": {
             "llm": True,
@@ -406,6 +483,34 @@ def _ir_to_markdown(ir: dict[str, Any]) -> str:
             f"- Zero Success IMSI: {subscriber.get('zero_success_imsi_count', 0):,}",
             f"- Top IMSI Failure Share: {subscriber.get('top_imsi_failure_share', 0)}%",
         ]
+
+    # 사전 분석 데이터
+    hints = _get_data(ir, "rca_hints", {})
+    if hints:
+        pattern_counts = hints.get("pattern_counts", {})
+        procedures = hints.get("high_failure_rate_procedures", {})
+
+        lines += [
+            " ",
+            "### 사전 분석 데이터",
+        ]
+
+        if pattern_counts:
+            lines += [
+                "| 구분 | 건수 | 비율 |",
+                "|---|---:|---:|",
+                f"| RAN 후보 패턴 | "
+                f"{pattern_counts.get('ran_candidate_count', 0)}건 | "
+                f"{pattern_counts.get('ran_candidate_pct', 0)}% |",
+                f"| Core 후보 패턴 | "
+                f"{pattern_counts.get('core_candidate_count', 0)}건 | "
+                f"{pattern_counts.get('core_candidate_pct', 0)}% |",
+            ]
+
+        if procedures:
+            lines += [" ", "| 절차 | 실패율 |", "|---|---:|"]
+            for ct, rate in sorted(procedures.items(), key=lambda x: x[1], reverse=True):
+                lines.append(f"| {ct} | {rate}% |")
 
     # Top Error Chains
     error_chains = _get_data(ir, "error_chains", [])
@@ -972,6 +1077,8 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     # error_chains = _get_data(...) if _is_llm(...) else []  # Failure Flow로 대체됨
     failure_flow = _get_data(observation, "failure_flow", []) \
         if _is_llm(observation, "failure_flow") else []
+    hints = _get_data(observation, "rca_hints", {}) \
+        if _is_llm(observation, "rca_hints") else {}
 
     top_mme = entity.get("top_mme", []) if _is_llm(observation, "entity_failure_contribution") else []
     top_enb = entity.get("top_enb", []) if _is_llm(observation, "entity_failure_contribution") else []
@@ -1130,6 +1237,67 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             "",
         ]
 
+    if hints:
+        pattern_counts = hints.get("pattern_counts", {})
+        concentration = hints.get("concentration", {})
+        subscriber_hint = hints.get("subscriber", {})
+        procedures = hints.get("high_failure_rate_procedures", {})
+        top_mme_hint = hints.get("top_mme", [])
+        critical_enb = concentration.get("critical_enb", [])
+
+        lines += [
+            "## 사전 분석 데이터",
+            "아래는 Backend가 계산한 관찰 사실이다. 영향도와 원인 판단은 LLM이 수행한다.",
+            "",
+        ]
+
+        if pattern_counts:
+            lines += [
+                "### 패턴 건수 (eNB 집중도 기반 분류)",
+                f"- RAN 후보 패턴 합계: {pattern_counts.get('ran_candidate_count', 0)}건 "
+                f"({pattern_counts.get('ran_candidate_pct', 0)}%)",
+                f"- Core 후보 패턴 합계: {pattern_counts.get('core_candidate_count', 0)}건 "
+                f"({pattern_counts.get('core_candidate_pct', 0)}%)",
+                "",
+            ]
+
+        if critical_enb:
+            lines.append("### 집중 장애 eNB")
+            for enb in critical_enb:
+                success = enb.get("success", -1)
+                success_str = f"성공 {success}건" if success >= 0 else ""
+                lines.append(
+                    f"- eNB {enb['entity_id']}: "
+                    f"{enb['failures']}건 실패 {success_str}, "
+                    f"기여율 {enb['failure_contribution_pct']}%"
+                )
+            lines.append("")
+
+        if subscriber_hint:
+            lines += [
+                "### 가입자 분포",
+                f"- 반복 실패 IMSI: {subscriber_hint.get('repeated_failure_imsi_count', 0)}명 / "
+                f"{subscriber_hint.get('affected_imsi_count', 0)}명 "
+                f"({subscriber_hint.get('repeated_failure_ratio', 0)}%)",
+                "",
+            ]
+
+        if procedures:
+            lines.append("### 높은 실패율 절차")
+            for ct, rate in sorted(procedures.items(), key=lambda x: x[1], reverse=True):
+                lines.append(f"- {ct}: {rate}%")
+            lines.append("")
+
+        if top_mme_hint:
+            lines.append("### MME 기여율")
+            for mme in top_mme_hint:
+                lines.append(
+                    f"- MME {mme['entity_id']}: "
+                    f"{mme['failures']}건, "
+                    f"기여율 {mme['failure_contribution_pct']}%"
+                )
+            lines.append("")
+
     lines += [
         "---",
         "",
@@ -1143,12 +1311,15 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "   - RAN 후보 / Core 후보 그룹의 타당성 검토 및 필요시 재분류",
         "",
         "2. 영향도 평가 (아래 테이블로 출력)",
+        "   위 사전 분석 데이터의 수치를 근거로 판단하세요.",
+        "   건수가 많다고 High가 아닙니다.",
+        "   해당 Domain 장애가 서비스에 미치는 실질적 영향을 기준으로 판단하세요.",
+        "   Subscriber/UE 영향도는 반드시 가입자 분포의 반복 실패 비율을 근거로 판단하세요.",
         "   | 구분 | 영향도 | 주요 근거 |",
         "   |---|---|---|",
         "   | RAN/Access | High/Medium/Low | 근거 |",
         "   | Core Network | High/Medium/Low | 근거 |",
         "   | Subscriber/UE | High/Medium/Low | 근거 |",
-        "   Subscriber 영향도는 반드시 repeated_failure_ratio, top_imsi_failure_share 수치를 근거로 평가",
         "",
         "3. 최종 RCA",
         "   - 영향도 High인 Domain부터 장애 위치와 조치 방향 작성",

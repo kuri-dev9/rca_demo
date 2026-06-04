@@ -13,7 +13,6 @@ import logging
 import os
 import resource
 import tempfile
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +36,7 @@ from app.rca.report_builder import (
     build_report_prompt_from_reasoning,
     build_loop_reasoning_steps,
     build_reasoning_messages,
+    _ir_to_markdown,
 )
 
 router = APIRouter(prefix="/api/rca", tags=["rca"])
@@ -69,30 +69,6 @@ def _rss_mb() -> float:
         return 0.0
 
 
-def _append_entity_contribution_section(lines: list[str], title: str, rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        return
-    lines += [
-        " ",
-        f"### {title}",
-        "| Entity | Attempts | Failures | Failure Contribution | Top Failure Pattern |",
-        "|---|---:|---:|---:|---|",
-    ]
-    for row in rows:
-        patterns = row.get("top_failure_patterns", [])
-        pattern_text = ", ".join(
-            f"{p.get('call_type') or '-'} / {p.get('interface') or '-'} / "
-            f"{p.get('message') or '-'} / {p.get('stage') or '-'} / "
-            f"{p.get('cause')}({p.get('count')})"
-            for p in patterns
-            if p.get("cause") and p.get("count") is not None
-        ) or "-"
-        lines.append(
-            f"| {row.get('entity_id')} | {row.get('attempts', 0):,} | {row.get('failures', 0):,} "
-            f"| {row.get('failure_contribution_pct', 0)}% | {pattern_text} |"
-        )
-
-
 def _subscriber_pattern_rows(analysis: RcaAnalysis) -> list[dict[str, Any]]:
     rows = []
     for seq in analysis.top_failed_imsi_sequences:
@@ -114,180 +90,7 @@ def _subscriber_pattern_rows(analysis: RcaAnalysis) -> list[dict[str, Any]]:
     return rows
 
 
-def _append_subscriber_pattern_section(lines: list[str], rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        return
-    lines += [
-        " ",
-        "### Subscriber Failure Pattern Summary",
-        "| IMSI | Stage | Cause | Attempts | Failures | IMSI Failure Rate | Total Failure Share | MME Count | eNB Count | Zero Success |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row.get('imsi_prefix')} | {row.get('stage') or '-'} | {row.get('cause') or '-'} "
-            f"| {row.get('attempts', 0):,} | {row.get('failures', 0):,} "
-            f"| {row.get('imsi_failure_rate', 0.0)}% | {row.get('total_failure_share', 0.0)}% "
-            f"| {row.get('mme_count', 0):,} "
-            f"| {row.get('enb_count', 0):,} | {'Y' if row.get('zero_success') else 'N'} |"
-        )
-
-
-def _build_subscriber_summary_rows(analysis: RcaAnalysis) -> list[str]:
-    summary = analysis.subscriber_mobility_summary or {}
-    affected = int(summary.get("affected_imsi_count") or len(analysis.affected_imsi_set))
-    repeated = int(summary.get("repeated_failure_imsi_count") or 0)
-    top_share = max(
-        (float(row.get("total_failure_share") or 0.0) for row in _subscriber_pattern_rows(analysis)),
-        default=0.0,
-    )
-    return [
-        f"Affected IMSI: {affected:,}",
-        f"Single Failure IMSI: {int(summary.get('single_failure_imsi_count') or 0):,}",
-        f"Repeated Failure IMSI: {repeated:,} ({_pct(repeated, affected)})",
-        f"Multi MME IMSI: {int(summary.get('multi_mme_imsi_count') or 0):,}",
-        f"Multi eNB IMSI: {int(summary.get('multi_enb_imsi_count') or 0):,}",
-        f"Zero Success IMSI: {int(summary.get('zero_success_imsi_count') or 0):,}",
-        f"Top IMSI Failure Share: {round(top_share, 1)}%",
-    ]
-
-
-def _append_subscriber_summary_section(lines: list[str], analysis: RcaAnalysis) -> None:
-    rows = _build_subscriber_summary_rows(analysis)
-    if not rows:
-        return
-    lines += [
-        " ",
-        "### Subscriber Summary",
-    ]
-    for row in rows:
-        lines.append(f"- {row}")
-
-
-def _pct(value: int, total: int) -> str:
-    return f"{round(value / total * 100, 1)}%" if total else "0.0%"
-
-
-def _append_subscriber_statistics_sections(lines: list[str], analysis: RcaAnalysis) -> None:
-    summary = analysis.subscriber_mobility_summary or {}
-    affected = int(summary.get("affected_imsi_count") or len(analysis.affected_imsi_set))
-    if affected:
-        repeated = int(summary.get("repeated_failure_imsi_count") or 0)
-        multi_mme = int(summary.get("multi_mme_imsi_count") or 0)
-        multi_enb = int(summary.get("multi_enb_imsi_count") or 0)
-        zero_success = int(summary.get("zero_success_imsi_count") or 0)
-        lines += [
-            " ",
-            "### Subscriber Mobility Summary",
-            f"- Affected IMSI: {affected:,}",
-            f"- Repeated Failure IMSI: {repeated:,} ({_pct(repeated, affected)})",
-            f"- Multi MME IMSI: {multi_mme:,} ({_pct(multi_mme, affected)})",
-            f"- Multi eNB IMSI: {multi_enb:,} ({_pct(multi_enb, affected)})",
-            f"- Zero Success IMSI: {zero_success:,} ({_pct(zero_success, affected)})",
-        ]
-
-
-def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
-    """RCA Observability Summary — 표(table) 형식."""
-    burst_val = (analysis.burst_window or "감지됨") if analysis.burst_detected else "없음"
-    lines = [
-        "## RCA Observability Summary",
-        " ",
-        "### 통계",
-        "| 항목 | 값 |",
-        "|---|---|",
-        f"| 총 레코드 | {analysis.total_records:,}건 |",
-        f"| 시도 | {analysis.attempt_count:,}건 |",
-        f"| 성공 | {analysis.success_count:,}건 |",
-        f"| 실패 | {analysis.failure_count:,}건 |",
-        f"| 실패율 | {analysis.failure_rate:.2f}% |",
-        f"| 영향 가입자 | {len(analysis.affected_imsi_set):,}명 |",
-        f"| Burst 감지 | {burst_val} |",
-    ]
-
-    if analysis.call_type_distribution:
-        lines += [
-            " ",
-            "### Call Type 분포",
-            "| Call Type | 건수 | 실패율 |",
-            "|---|---:|---:|",
-        ]
-        for call_type, cnt in sorted(analysis.call_type_distribution.items(), key=lambda x: x[1], reverse=True):
-            lines.append(f"| {call_type} | {cnt:,} | {analysis.call_type_failure_rate.get(call_type, 0.0)}% |")
-
-    # Interface Failure 분포
-    if analysis.interface_distribution:
-        lines += [
-            " ",
-            "### Interface Failure 분포",
-            "| Interface | 건수 |",
-            "|---|---|",
-        ]
-        for iface, cnt in sorted(analysis.interface_distribution.items(), key=lambda x: x[1], reverse=True)[:8]:
-            lines.append(f"| {iface} | {cnt:,} |")
-
-    # Failure Stage 분포
-    stage_hist: Counter[str] = Counter(c.failure_point for c in analysis.failure_chains)
-    if stage_hist:
-        lines += [
-            " ",
-            "### Failure Stage 분포",
-            "| Stage | 건수 |",
-            "|---|---|",
-        ]
-        for stage, cnt in stage_hist.most_common(8):
-            lines.append(f"| {stage} | {cnt:,} |")
-
-    # Entity failure contribution
-    entity_contrib = analysis.entity_failure_contributions or {}
-    _append_entity_contribution_section(lines, "MME Failure Contribution", entity_contrib.get("mme", []))
-    _append_entity_contribution_section(lines, "eNB Failure Contribution", entity_contrib.get("enb", []))
-    _append_entity_contribution_section(lines, "SGW Failure Contribution", entity_contrib.get("sgw", []))
-
-    _append_subscriber_summary_section(lines, analysis)
-
-    if analysis.error_chains:
-        lines += [
-            " ",
-            "### Top Error Chains",
-            "| Call Type | First Error | Last Error | Count |",
-            "|---|---|---|---:|",
-        ]
-        for row in analysis.error_chains[:8]:
-            first = row.get("first_error", {})
-            last = row.get("last_error", {})
-            first_text = (
-                f"{first.get('interface') or '-'} / {first.get('message') or '-'} / "
-                f"{first.get('cause') or '-'}"
-            )
-            last_text = (
-                f"{last.get('interface') or '-'} / {last.get('message') or '-'} / "
-                f"{last.get('cause') or '-'}"
-            )
-            lines.append(
-                f"| {row.get('call_type') or '-'} | {first_text} | {last_text} | {row.get('count', 0):,} |"
-            )
-
-    # Shared Failure Observations
-    if analysis.shared_failure_signatures:
-        lines += [
-            " ",
-            "### 유형별 실패 통계",
-            "| Call Type | Interface | Message | Stage | Cause | Count | IMSI | MME | eNB |",
-            "|---|---|---|---|---|---|---|---|---|",
-        ]
-        for s in analysis.shared_failure_signatures[:8]:
-            lines.append(
-                f"| {s.get('call_type') or '-'} | {s['interface']} | {s.get('message') or '-'} "
-                f"| {s['stage']} | {s['cause']} "
-                f"| {s['count']} | {s['affected_imsi_count']} "
-                f"| {s['affected_mme_count']} | {s['affected_enb_count']} |"
-            )
-
-    return "\n".join(lines)
-
-
-def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]:
+def _analysis_to_response(analysis: RcaAnalysis, conv_id: int, compact_rca_ir: dict[str, Any]) -> dict[str, Any]:
     """RcaAnalysis → JSON-serializable response dict."""
     chains_raw = []
     for c in analysis.failure_chains[:20]:
@@ -304,7 +107,7 @@ def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]
             "chain": c.chain,
         })
 
-    assistant_message = _analysis_to_markdown(analysis)
+    assistant_message = _ir_to_markdown(compact_rca_ir)
 
     return {
         "parse_stats": analysis.parse_stats,
@@ -372,7 +175,7 @@ async def _analyze_file_path(
         db.add(conv)
         await db.flush()
 
-        assistant_message = _analysis_to_markdown(analysis)
+        assistant_message = _ir_to_markdown(compact_rca_ir)
         db.add(Message(
             conversation_id=conv.id,
             role="user",
@@ -386,7 +189,7 @@ async def _analyze_file_path(
         await db.commit()
         await db.refresh(conv)
 
-        response = _analysis_to_response(analysis, conv.id)
+        response = _analysis_to_response(analysis, conv.id, compact_rca_ir)
         return response
     finally:
         del records, analysis, compact_rca_ir, assistant_message, response

@@ -184,40 +184,243 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
     subscriber_patterns = _subscriber_failure_patterns_from_sequences(analysis.top_failed_imsi_sequences)
     return {
         "statistics": {
-            "attempt_count": analysis.attempt_count,
-            "success_count": analysis.success_count,
-            "failure_count": analysis.failure_count,
-            "failure_rate": round(analysis.failure_rate, 2),
+            "llm": True,
+            "data": {
+                "total_records": analysis.total_records,
+                "attempt_count": analysis.attempt_count,
+                "success_count": analysis.success_count,
+                "failure_count": analysis.failure_count,
+                "failure_rate": round(analysis.failure_rate, 2),
+            },
         },
-        # 아래 두 항목은 shared_failure_observations로 커버되므로 off
-        # "interface_failure_distribution": dict(analysis.interface_distribution),
-        # "failure_stage_distribution": dict(stage_counter),
+        "call_type_distribution": {
+            "llm": False,   # 전체 건수는 노이즈 — LLM에 미전달
+            "data": dict(analysis.call_type_distribution),
+        },
         "call_type_failure_summary": {
-            ct: {
-                "failure_rate": analysis.call_type_failure_rate.get(ct, 0),
-                "total": cnt,
-            }
-            for ct, cnt in analysis.call_type_distribution.items()
-            if analysis.call_type_failure_rate.get(ct, 0) > 0
+            "llm": True,
+            "data": {
+                ct: {
+                    "total": cnt,
+                    "failure_rate": analysis.call_type_failure_rate.get(ct, 0),
+                }
+                for ct, cnt in analysis.call_type_distribution.items()
+                if analysis.call_type_failure_rate.get(ct, 0) > 0
+            },
         },
-        # representative_chains는 error_chains + shared_failure_observations로 커버되므로 off
-        # "representative_chains": rep_chains,
-        "error_chains": analysis.error_chains,
+        # shared_failure_observations로 커버되므로 off
+        "interface_failure_distribution": {
+            "llm": False,
+            "data": dict(analysis.interface_distribution),
+        },
+        # shared_failure_observations로 커버되므로 off
+        "failure_stage_distribution": {
+            "llm": False,
+            "data": dict(stage_counter),
+        },
+        # error_chains + shared_failure_observations로 커버되므로 off
+        "representative_chains": {
+            "llm": False,
+            "data": rep_chains,
+        },
+        "error_chains": {
+            "llm": True,
+            "data": analysis.error_chains,
+        },
         "entity_failure_contribution": {
-            "top_mme": analysis.entity_failure_contributions.get("mme", []),
-            "top_enb": analysis.entity_failure_contributions.get("enb", []),
-            "top_sgw": analysis.entity_failure_contributions.get("sgw", []),
+            "llm": True,
+            "data": {
+                "top_mme": analysis.entity_failure_contributions.get("mme", []),
+                "top_enb": analysis.entity_failure_contributions.get("enb", []),
+                "top_sgw": analysis.entity_failure_contributions.get("sgw", []),
+            },
         },
-        "shared_failure_observations": _compact_shared_failures(analysis.shared_failure_signatures),
-        # Legacy comparison payload. Keep the generation code above for future A/B tests,
-        # but do not send per-IMSI rows to the one-shot RCA path.
-        # "subscriber_failure_patterns": subscriber_patterns,
-        "subscriber_summary": _build_subscriber_summary(
-            subscriber_patterns,
-            analysis.subscriber_mobility_summary,
-        ),
-        "burst_detected": bool(analysis.burst_detected),
+        "shared_failure_observations": {
+            "llm": True,
+            "data": _compact_shared_failures(analysis.shared_failure_signatures),
+        },
+        "subscriber_summary": {
+            "llm": True,
+            "data": _build_subscriber_summary(
+                subscriber_patterns,
+                analysis.subscriber_mobility_summary,
+            ),
+        },
+        "burst_detected": {
+            "llm": True,
+            "data": bool(analysis.burst_detected),
+        },
     }
+
+
+def _get_data(ir: dict[str, Any], key: str, default: Any = None) -> Any:
+    """compact_rca_ir에서 data 값 추출. 구버전 호환(플래그 없는 dict)도 지원."""
+    val = ir.get(key, default)
+    if isinstance(val, dict) and "data" in val:
+        return val["data"]
+    return val if val is not None else default
+
+
+def _is_llm(ir: dict[str, Any], key: str) -> bool:
+    """해당 섹션의 llm 플래그 반환. 플래그 없으면 True."""
+    val = ir.get(key)
+    if isinstance(val, dict) and "llm" in val:
+        return bool(val["llm"])
+    return True
+
+
+def _ir_to_markdown(ir: dict[str, Any]) -> str:
+    """compact_rca_ir → 화면용 마크다운 테이블. llm 플래그 무시하고 전체 출력."""
+    stats = _get_data(ir, "statistics", {})
+    burst = _get_data(ir, "burst_detected", False)
+    burst_val = "감지됨" if burst else "없음"
+
+    lines = [
+        "## RCA Observability Summary",
+        " ",
+        "### 통계",
+        "| 항목 | 값 |",
+        "|---|---|",
+        f"| 총 레코드 | {stats.get('total_records', 0):,}건 |",
+        f"| 시도 | {stats.get('attempt_count', 0):,}건 |",
+        f"| 성공 | {stats.get('success_count', 0):,}건 |",
+        f"| 실패 | {stats.get('failure_count', 0):,}건 |",
+        f"| 실패율 | {stats.get('failure_rate', 0):.2f}% |",
+        f"| Burst 감지 | {burst_val} |",
+    ]
+
+    # Call Type 분포 (전체 건수 + 실패율)
+    call_type_dist = _get_data(ir, "call_type_distribution", {})
+    call_type_failure_summary = _get_data(ir, "call_type_failure_summary", {})
+    if call_type_dist:
+        lines += [
+            " ",
+            "### Call Type 분포",
+            "| Call Type | 건수 | 실패율 |",
+            "|---|---:|---:|",
+        ]
+        for ct, cnt in sorted(call_type_dist.items(), key=lambda x: x[1], reverse=True):
+            fr = call_type_failure_summary.get(ct, {}).get("failure_rate", 0.0) \
+                if isinstance(call_type_failure_summary.get(ct), dict) \
+                else 0.0
+            lines.append(f"| {ct} | {cnt:,} | {fr}% |")
+
+    # Interface Failure 분포
+    iface_dist = _get_data(ir, "interface_failure_distribution", {})
+    if iface_dist:
+        lines += [
+            " ",
+            "### Interface Failure 분포",
+            "| Interface | 건수 |",
+            "|---|---|",
+        ]
+        for iface, cnt in sorted(iface_dist.items(), key=lambda x: x[1], reverse=True)[:8]:
+            lines.append(f"| {iface} | {cnt:,} |")
+
+    # Failure Stage 분포
+    stage_dist = _get_data(ir, "failure_stage_distribution", {})
+    if stage_dist:
+        lines += [
+            " ",
+            "### Failure Stage 분포",
+            "| Stage | 건수 |",
+            "|---|---|",
+        ]
+        for stage, cnt in sorted(stage_dist.items(), key=lambda x: x[1], reverse=True)[:8]:
+            lines.append(f"| {stage} | {cnt:,} |")
+
+    # MME / eNB / SGW Failure Contribution
+    entity = _get_data(ir, "entity_failure_contribution", {})
+    for label, key in [("MME", "top_mme"), ("eNB", "top_enb"), ("SGW", "top_sgw")]:
+        rows = entity.get(key, [])
+        if not rows:
+            continue
+        lines += [
+            " ",
+            f"### {label} Failure Contribution",
+            "| Entity | Attempts | Failures | Failure Contribution | Top Failure Pattern |",
+            "|---|---:|---:|---:|---|",
+        ]
+        for row in rows:
+            patterns = row.get("top_failure_patterns", [])
+            pattern_text = ", ".join(
+                f"{p.get('call_type') or '-'} / {p.get('interface') or '-'} / "
+                f"{p.get('message') or '-'} / {p.get('stage') or '-'} / "
+                f"{p.get('cause')}({p.get('count')})"
+                for p in patterns
+                if p.get("cause") and p.get("count") is not None
+            ) or "-"
+            lines.append(
+                f"| {row.get('entity_id')} | {row.get('attempts', 0):,} "
+                f"| {row.get('failures', 0):,} "
+                f"| {row.get('failure_contribution_pct', 0)}% | {pattern_text} |"
+            )
+
+    # Subscriber Summary
+    subscriber = _get_data(ir, "subscriber_summary", {})
+    if subscriber:
+        affected = subscriber.get("affected_imsi_count", 0)
+        repeated = subscriber.get("repeated_failure_imsi_count", 0)
+        ratio = subscriber.get("repeated_failure_ratio", 0)
+        lines += [
+            " ",
+            "### Subscriber Summary",
+            f"- Affected IMSI: {affected:,}",
+            f"- Single Failure IMSI: {subscriber.get('single_failure_imsi_count', 0):,}",
+            f"- Repeated Failure IMSI: {repeated:,} ({ratio}%)",
+            f"- Multi MME IMSI: {subscriber.get('multi_mme_imsi_count', 0):,}",
+            f"- Multi eNB IMSI: {subscriber.get('multi_enb_imsi_count', 0):,}",
+            f"- Zero Success IMSI: {subscriber.get('zero_success_imsi_count', 0):,}",
+            f"- Top IMSI Failure Share: {subscriber.get('top_imsi_failure_share', 0)}%",
+        ]
+
+    # Top Error Chains
+    error_chains = _get_data(ir, "error_chains", [])
+    if error_chains:
+        lines += [
+            " ",
+            "### Top Error Chains",
+            "| Call Type | First Error | Last Error | Count |",
+            "|---|---|---|---:|",
+        ]
+        for row in error_chains[:8]:
+            first = row.get("first_error", {})
+            last = row.get("last_error", {})
+            first_text = (
+                f"{first.get('interface') or '-'} / "
+                f"{first.get('message') or '-'} / "
+                f"{first.get('cause') or '-'}"
+            )
+            last_text = (
+                f"{last.get('interface') or '-'} / "
+                f"{last.get('message') or '-'} / "
+                f"{last.get('cause') or '-'}"
+            )
+            lines.append(
+                f"| {row.get('call_type') or '-'} "
+                f"| {first_text} | {last_text} | {row.get('count', 0):,} |"
+            )
+
+    # 유형별 실패 통계 (shared_failure_observations)
+    shared = _get_data(ir, "shared_failure_observations", [])
+    if shared:
+        lines += [
+            " ",
+            "### 유형별 실패 통계",
+            "| Call Type | Interface | Message | Stage | Cause | Count | IMSI | MME | eNB |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for s in shared[:8]:
+            lines.append(
+                f"| {s.get('call_type') or '-'} | {s.get('interface') or '-'} "
+                f"| {s.get('message') or '-'} | {s.get('stage') or '-'} "
+                f"| {s.get('cause') or '-'} | {s.get('count', 0)} "
+                f"| {s.get('affected_imsi_count', 0)} "
+                f"| {s.get('affected_mme_count', 0)} "
+                f"| {s.get('affected_enb_count', 0)} |"
+            )
+
+    return "\n".join(lines)
 
 
 def build_compact_reasoning_json(observability: dict[str, Any]) -> dict[str, Any]:
@@ -564,17 +767,17 @@ def build_loop_step_messages(step_name: str, payload: dict[str, Any]) -> list[di
 
 def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
     payload = {
-        "entity_failure_contribution": compact_rca_ir.get("entity_failure_contribution", {}),
-        "shared_failure_observations": compact_rca_ir.get("shared_failure_observations", []),
-        "interface_failure_distribution": compact_rca_ir.get("interface_failure_distribution", {}),
-        "failure_stage_distribution": compact_rca_ir.get("failure_stage_distribution", {}),
+        "entity_failure_contribution": _get_data(compact_rca_ir, "entity_failure_contribution", {}),
+        "shared_failure_observations": _get_data(compact_rca_ir, "shared_failure_observations", []),
+        "interface_failure_distribution": _get_data(compact_rca_ir, "interface_failure_distribution", {}),
+        "failure_stage_distribution": _get_data(compact_rca_ir, "failure_stage_distribution", {}),
     }
     return build_loop_step_messages("step1", payload)
 
 
 def build_loop_step2_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
     patterns = sorted(
-        compact_rca_ir.get("subscriber_failure_patterns", []),
+        _get_data(compact_rca_ir, "subscriber_failure_patterns", []),
         key=lambda row: _num(row.get("total_failure_share")),
         reverse=True,
     )[:5]
@@ -592,9 +795,9 @@ def build_loop_step2_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, 
         for row in patterns
     ]
     payload = {
-        "statistics": compact_rca_ir.get("statistics", {}),
+        "statistics": _get_data(compact_rca_ir, "statistics", {}),
         "subscriber_failure_patterns": compact_patterns,
-        "subscriber_mobility_summary": compact_rca_ir.get("subscriber_mobility_summary", {}),
+        "subscriber_mobility_summary": _get_data(compact_rca_ir, "subscriber_mobility_summary", {}),
     }
     return build_loop_step_messages("step2", payload)
 
@@ -695,32 +898,42 @@ def build_gemma4_system_prompt() -> str:
 
 
 def _format_gemma_user_message(observation: dict[str, Any]) -> str:
-    stats = observation.get("statistics", {})
-    entity = observation.get("entity_failure_contribution", {})
-    shared = observation.get("shared_failure_observations", [])
-    subscriber = observation.get("subscriber_summary", {})
-    call_type_failure_summary = observation.get("call_type_failure_summary", {})
-    error_chains = observation.get("error_chains", [])
+    stats = _get_data(observation, "statistics", {})
+    entity = _get_data(observation, "entity_failure_contribution", {}) \
+        if _is_llm(observation, "entity_failure_contribution") else {}
+    shared = _get_data(observation, "shared_failure_observations", []) \
+        if _is_llm(observation, "shared_failure_observations") else []
+    subscriber = _get_data(observation, "subscriber_summary", {}) \
+        if _is_llm(observation, "subscriber_summary") else {}
+    call_type_failure_summary = _get_data(observation, "call_type_failure_summary", {}) \
+        if _is_llm(observation, "call_type_failure_summary") else {}
+    error_chains = _get_data(observation, "error_chains", []) \
+        if _is_llm(observation, "error_chains") else []
+
+    top_mme = entity.get("top_mme", []) if _is_llm(observation, "entity_failure_contribution") else []
+    top_enb = entity.get("top_enb", []) if _is_llm(observation, "entity_failure_contribution") else []
 
     lines = []
 
-    # 통계
+    # 통계 (llm=True)
     lines += [
         "## 장애 통계",
-        f"- 실패: {stats.get('failure_count', 0):,}건 / 시도: {stats.get('attempt_count', 0):,}건",
+        f"- 총 레코드: {stats.get('total_records', 0):,}건",
+        f"- 시도: {stats.get('attempt_count', 0):,}건",
+        f"- 실패: {stats.get('failure_count', 0):,}건",
+        f"- 실패율: {stats.get('failure_rate', 0)}%",
         "",
     ]
 
     if call_type_failure_summary:
         lines.append("## 절차별 실패율")
         for ct, info in call_type_failure_summary.items():
-            lines.append(
-                f"- {ct}: 전체 {info['total']:,}건 중 실패율 {info['failure_rate']}%"
-            )
+            if isinstance(info, dict):
+                lines.append(
+                    f"- {ct}: 전체 {info['total']:,}건 중 실패율 {info['failure_rate']}%"
+                )
         lines.append("")
 
-    # MME
-    top_mme = entity.get("top_mme", [])
     if top_mme:
         lines.append("## MME 장애 기여")
         for mme in top_mme:
@@ -735,14 +948,13 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
                 )
         lines.append("")
 
-    # eNB
-    top_enb = entity.get("top_enb", [])
     if top_enb:
         lines.append("## eNB 장애 기여")
         for enb in top_enb:
             lines.append(
                 f"- eNB {enb['entity_id']}: "
-                f"{enb['failures']}건 실패 (성공 {enb['success']}건), 기여율 {enb['failure_contribution_pct']}%"
+                f"{enb['failures']}건 실패 (성공 {enb['success']}건), "
+                f"기여율 {enb['failure_contribution_pct']}%"
             )
             for p in enb.get("top_failure_patterns", []):
                 lines.append(
@@ -751,7 +963,6 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
                 )
         lines.append("")
 
-    # 반복 패턴
     if shared:
         lines.append("## 반복 장애 패턴")
         for s in shared:
@@ -759,8 +970,8 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             # eNB 집중도: 1~2개면 집중, 그 이상이면 분산
             enb_label = "[집중]" if enb_count <= 2 else "[분산]"
             lines.append(
-                f"- {s.get('call_type', '-')} / {s['interface']} / "
-                f"{s.get('message', '-')} / {s['stage']} / {s['cause']}: "
+                f"- {s.get('call_type', '-')} / {s.get('interface', '-')} / "
+                f"{s.get('message', '-')} / {s.get('stage', '-')} / {s.get('cause', '-')}: "
                 f"{s['count']}건, "
                 f"영향 IMSI {s['affected_imsi_count']}명, "
                 f"MME {s['affected_mme_count']}개, "
@@ -775,13 +986,14 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             last = row.get("last_error", {})
             lines.append(
                 f"- {row.get('call_type', '-')}: "
-                f"First {first.get('interface', '-')} / {first.get('message', '-')} / {first.get('cause', '-')} "
-                f"→ Last {last.get('interface', '-')} / {last.get('message', '-')} / {last.get('cause', '-')} "
+                f"First {first.get('interface', '-')} / "
+                f"{first.get('message', '-')} / {first.get('cause', '-')} "
+                f"→ Last {last.get('interface', '-')} / "
+                f"{last.get('message', '-')} / {last.get('cause', '-')} "
                 f"({row.get('count', 0)}건)"
             )
         lines.append("")
 
-    # 가입자 요약
     if subscriber:
         lines += [
             "## 가입자 요약",
@@ -793,21 +1005,12 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             "",
         ]
 
-    # 분석 지시
     lines += [
         "---",
         "",
         "위 데이터를 기반으로 아래 순서로 분석하세요.",
         "데이터에 있는 call_type, 장비명, interface, message, stage, cause, 수치를 그대로 인용하세요.",
         "데이터에 없는 값은 생성하지 마세요.",
-        "",
-        "출력 첫 줄은 반드시 `## 최종 RCA` 로 시작하세요.",
-        "RCA Domain은 Core-side Dominant / RAN/Access-side Dominant / Subscriber/UE-side Dominant / Mixed / Unknown 중 하나만 사용하세요.",
-        "Core-side는 S6a, S11, MME, SGW, PGW, HSS 관련 관측이 우세한 경우입니다.",
-        "RAN/Access-side는 eNB, S1MME, S1AP, Radio 관련 관측이 우세한 경우입니다.",
-        "Subscriber/UE-side는 UE_not_responding, Unable_to_page_UE, IMSI 반복 실패 관측이 우세한 경우입니다.",
-        "주요 절차는 입력에 있는 call_type만 사용하세요.",
-        "Classification, Reasoning, Conclusion, Summary 제목은 사용하지 마세요.",
         "",
         "## 최종 판단을 먼저 작성하세요:",
         "- RCA Domain: RAN-side Dominant / Core-side Dominant / Mixed / Unknown 중 하나",

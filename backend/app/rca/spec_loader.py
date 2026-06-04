@@ -8,6 +8,9 @@ XDR Specification, MessageCode, Cause xlsx 파일을 로딩하여
 
 import os
 import logging
+import re
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Dict, Tuple, Optional, Any
 from pathlib import Path
 
@@ -469,6 +472,210 @@ PROCESS_SPECIFIC_CAUSE_MAP = {
 }
 
 
+_XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _normalize_spec_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s*/\s*", "_", text)
+    text = re.sub(r"[\s\-]+", "_", text)
+    text = re.sub(r"[^0-9A-Za-z_]+", "", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text
+
+
+def _parse_int(value: Any) -> Optional[int]:
+    text = str(value or "").strip()
+    if not text or "-" in text:
+        return None
+    try:
+        return int(text, 0)
+    except ValueError:
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+
+
+def _xlsx_col_index(cell_ref: str) -> int:
+    match = re.match(r"([A-Z]+)", cell_ref or "")
+    if not match:
+        return 0
+    idx = 0
+    for ch in match.group(1):
+        idx = idx * 26 + ord(ch) - ord("A") + 1
+    return idx - 1
+
+
+def _read_xlsx_sheets(path: Path) -> dict[str, list[list[str]]]:
+    sheets: dict[str, list[list[str]]] = {}
+    with zipfile.ZipFile(path) as zf:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.findall(f"{{{_XLSX_MAIN_NS}}}si"):
+                shared_strings.append("".join(t.text or "" for t in si.iter(f"{{{_XLSX_MAIN_NS}}}t")))
+
+        workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+        rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+        rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
+
+        for sheet in workbook.findall(f"{{{_XLSX_MAIN_NS}}}sheets/{{{_XLSX_MAIN_NS}}}sheet"):
+            sheet_name = sheet.attrib["name"]
+            rel_id = sheet.attrib[f"{{{_XLSX_REL_NS}}}id"]
+            target = rel_map.get(rel_id)
+            if not target:
+                continue
+            root = ET.fromstring(zf.read(f"xl/{target}"))
+            rows: list[list[str]] = []
+            for row in root.findall(f"{{{_XLSX_MAIN_NS}}}sheetData/{{{_XLSX_MAIN_NS}}}row"):
+                values: list[str] = []
+                for cell in row.findall(f"{{{_XLSX_MAIN_NS}}}c"):
+                    col_idx = _xlsx_col_index(cell.attrib.get("r", "A"))
+                    while len(values) <= col_idx:
+                        values.append("")
+                    cell_type = cell.attrib.get("t")
+                    value_node = cell.find(f"{{{_XLSX_MAIN_NS}}}v")
+                    text = ""
+                    if cell_type == "s" and value_node is not None and value_node.text is not None:
+                        text = shared_strings[int(value_node.text)]
+                    elif cell_type == "inlineStr":
+                        text = "".join(t.text or "" for t in cell.iter(f"{{{_XLSX_MAIN_NS}}}t"))
+                    elif value_node is not None and value_node.text is not None:
+                        text = value_node.text
+                    values[col_idx] = text.strip()
+                if any(values):
+                    rows.append(values)
+            sheets[sheet_name] = rows
+    return sheets
+
+
+def _data_dir_candidates() -> list[Path]:
+    candidates = []
+    if os.environ.get("PROJ_HOME"):
+        candidates.append(Path(os.environ["PROJ_HOME"]) / "docs" / "data")
+    candidates.append(Path.cwd() / "docs" / "data")
+    here = Path(__file__).resolve()
+    candidates.extend(parent / "docs" / "data" for parent in here.parents)
+    return candidates
+
+
+def _find_xdr_xlsx(filename: str) -> Optional[Path]:
+    for directory in _data_dir_candidates():
+        path = directory / filename
+        if path.exists():
+            return path
+    return None
+
+
+def _add_message(protocols: list[str], code: Any, name: Any) -> None:
+    code_int = _parse_int(code)
+    normalized = _normalize_spec_name(name)
+    if code_int is None or not normalized:
+        return
+    for protocol in protocols:
+        MESSAGE_CODE_MAP[(protocol, code_int)] = normalized
+
+
+def _add_cause(protocols: list[str], code: Any, meaning: Any, description: Any = "") -> None:
+    code_int = _parse_int(code)
+    normalized = _normalize_spec_name(meaning)
+    if code_int is None or not normalized:
+        return
+    for protocol in protocols:
+        CAUSE_MAP[(protocol, code_int)] = {
+            "meaning": normalized,
+            "description": str(description or "").strip(),
+        }
+
+
+def _load_message_codes_from_xlsx() -> None:
+    path = _find_xdr_xlsx("XDR_MessageCode_v0.6.xlsx")
+    if not path:
+        return
+    sheets = _read_xlsx_sheets(path)
+
+    for row in sheets.get("Interface protocol", [])[1:]:
+        if len(row) >= 3:
+            code = _parse_int(row[2])
+            name = _normalize_spec_name(row[1])
+            if code is not None and name:
+                INTERFACE_PROTOCOL_MAP[code] = name
+
+    for row in sheets.get("Diameter", [])[1:]:
+        name = row[3] if len(row) > 3 and row[3] else row[2] if len(row) > 2 else ""
+        code = row[4] if len(row) > 4 else ""
+        _add_message(["S6a_Diameter", "S13_Diameter"], code, name)
+
+    for row in sheets.get("S1AP", [])[2:]:
+        if len(row) > 4:
+            _add_message(["S1MME_S1AP"], row[4], row[3])
+        if len(row) > 7:
+            _add_message(["S1MME_S1AP"], row[7], row[6])
+        if len(row) > 10:
+            _add_message(["S1MME_S1AP"], row[10], row[9])
+
+    for row in sheets.get("NAS EMM", [])[2:]:
+        if len(row) > 3:
+            _add_message(["S1MME_NAS_EMM"], row[3], row[1])
+
+    for row in sheets.get("NAS ESM", [])[2:]:
+        if len(row) > 3:
+            _add_message(["S1MME_NAS_ESM"], row[3], row[1])
+
+    for row in sheets.get("GTPv2C", [])[1:]:
+        if len(row) > 4:
+            _add_message(["S11_GTPv2C", "S10_GTPv2C"], row[4], row[3])
+
+
+def _load_causes_from_xlsx() -> None:
+    path = _find_xdr_xlsx("XDR_Cause_v0.5.xlsx")
+    if not path:
+        return
+    sheets = _read_xlsx_sheets(path)
+
+    for row in sheets.get("S1AP", [])[2:]:
+        if len(row) > 4:
+            _add_cause(["S1MME_S1AP"], row[3], row[4], row[5] if len(row) > 5 else "")
+
+    for row in sheets.get("NAS", [])[2:]:
+        if len(row) > 3:
+            ie = row[1]
+            protocols = ["S1MME_NAS_ESM"] if "ESM" in ie else ["S1MME_NAS_EMM"]
+            _add_cause(protocols, row[2], row[3])
+
+    for row in sheets.get("Diameter", [])[1:]:
+        if len(row) > 5:
+            _add_cause(["S6a_Diameter", "S13_Diameter"], row[4], row[5])
+
+    for row in sheets.get("GTPv2-C", [])[1:]:
+        if len(row) > 4:
+            _add_cause(["S11_GTPv2C", "S10_GTPv2C"], row[3], row[4])
+
+    for row in sheets.get("Process_Specific_Cause", [])[1:]:
+        if len(row) > 2:
+            _add_cause(list(INTERFACE_PROTOCOL_MAP.values()), row[1], row[2])
+
+
+def _load_dynamic_specs() -> None:
+    try:
+        _load_message_codes_from_xlsx()
+        _load_causes_from_xlsx()
+        logger.info(
+            "Loaded XDR spec mappings: messages=%s causes=%s",
+            len(MESSAGE_CODE_MAP),
+            len(CAUSE_MAP),
+        )
+    except Exception as exc:
+        logger.warning("Failed to load XDR spec mappings: %s", exc)
+
+
+_load_dynamic_specs()
+
+
 def get_interface_name(code: int) -> str:
     """Interface protocol 코드 → 이름"""
     return INTERFACE_PROTOCOL_MAP.get(code, f"UNKNOWN_IFACE_{code}")
@@ -477,6 +684,9 @@ def get_interface_name(code: int) -> str:
 def get_message_name(interface_code: int, msg_code: int) -> str:
     """Interface + Message 코드 → 메시지 이름"""
     iface = INTERFACE_PROTOCOL_MAP.get(interface_code, "")
+    dynamic_name = MESSAGE_CODE_MAP.get((iface, msg_code))
+    if dynamic_name:
+        return dynamic_name
 
     if "S6a" in iface or "S13" in iface:
         return DIAMETER_MSG.get(msg_code, f"DIAMETER_MSG_{msg_code}")
@@ -499,6 +709,9 @@ def get_cause_name(interface_code: int, cause_code: int) -> str:
         return "TIMEOUT"
 
     iface = INTERFACE_PROTOCOL_MAP.get(interface_code, "")
+    dynamic_cause = CAUSE_MAP.get((iface, cause_code))
+    if dynamic_cause:
+        return dynamic_cause.get("meaning") or dynamic_cause.get("name") or f"CAUSE_{cause_code}"
 
     if "S6a" in iface or "S13" in iface:
         name = DIAMETER_CAUSE_MAP.get(cause_code)

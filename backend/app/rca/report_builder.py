@@ -190,8 +190,14 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             "failure_rate": round(analysis.failure_rate, 2),
         },
         "interface_failure_distribution": dict(analysis.interface_distribution),
-        "call_type_distribution": dict(analysis.call_type_distribution),
-        "call_type_failure_rate": analysis.call_type_failure_rate,
+        "call_type_failure_summary": {
+            ct: {
+                "failure_rate": analysis.call_type_failure_rate.get(ct, 0),
+                "total": cnt,
+            }
+            for ct, cnt in analysis.call_type_distribution.items()
+            if analysis.call_type_failure_rate.get(ct, 0) > 0
+        },
         "failure_stage_distribution": dict(stage_counter),
         "representative_chains": rep_chains,
         "error_chains": analysis.error_chains,
@@ -675,41 +681,15 @@ def build_report_prompt_from_reasoning(
 
 def build_gemma4_system_prompt() -> str:
     return """\
-당신은 LTE/EPC RCA 분석 엔진이다.
+당신은 LTE/EPC 네트워크 장애 분석 전문가다.
+3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
+아래 제공된 데이터를 기반으로 장애 위치를 특정하고 조치 방향을 제시한다.
 
-반드시 입력 데이터만 사용한다.
-반드시 한국어로 작성한다.
-반드시 아래 Markdown 구조만 출력한다.
-
-분석 우선순위
-1. Top Error Chains
-2. 반복 장애 패턴
-3. MME/eNB 장애 기여
-4. 가입자 요약
-
-위 순서로 RCA를 수행하라.
-
-## 최종 RCA
-
-| 항목 | 값 |
-|---|---|
-| RCA Domain | Core-side Dominant 또는 RAN/Access-side Dominant 또는 Subscriber/UE-side Dominant 또는 Mixed 또는 Unknown |
-| 신뢰도 | High 또는 Medium 또는 Low |
-| 주요 절차 | ATTACH / PAGING / SERVICE_REQUEST / TAU / DETACH 등 실제 관측된 절차 |
-| 주요 장애 위치 | Interface 기준 |
-
-## 판단 근거
-
-### Domain 판단 근거
-
-### 주요 절차 분석
-
-### 장애 위치 분석
-
-### 조치 방향
-
-중요:
-- 지정된 섹션 외의 추가 섹션을 생성하지 마라."""
+반드시 지킬 것:
+- 데이터에 있는 장비명, interface, message, stage, cause, 수치를 그대로 인용한다.
+- 데이터에 없는 장비, IMSI, Cause, Interface, Stage, 수치를 생성하지 않는다.
+- 반드시 한국어로 작성한다.
+"""
 
 
 def _format_gemma_user_message(observation: dict[str, Any]) -> str:
@@ -717,7 +697,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     entity = observation.get("entity_failure_contribution", {})
     shared = observation.get("shared_failure_observations", [])
     subscriber = observation.get("subscriber_summary", {})
-    call_type_dist = observation.get("call_type_distribution", {})
+    call_type_failure_summary = observation.get("call_type_failure_summary", {})
     error_chains = observation.get("error_chains", [])
 
     lines = []
@@ -731,10 +711,12 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "",
     ]
 
-    if call_type_dist:
-        lines.append("## 절차별 관측")
-        for call_type, count in call_type_dist.items():
-            lines.append(f"- {call_type}: {count:,}건")
+    if call_type_failure_summary:
+        lines.append("## 절차별 실패율")
+        for ct, info in call_type_failure_summary.items():
+            lines.append(
+                f"- {ct}: 전체 {info['total']:,}건 중 실패율 {info['failure_rate']}%"
+            )
         lines.append("")
 
     # MME
@@ -824,13 +806,8 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "주요 절차는 입력에 있는 call_type만 사용하세요.",
         "Classification, Reasoning, Conclusion, Summary 제목은 사용하지 마세요.",
         "",
-        "출력에는 반드시 다음 섹션만 사용하세요.",
-        "## 최종 RCA",
-        "## 판단 근거",
-        "### Domain 판단 근거",
-        "### 주요 절차 분석",
-        "### 장애 위치 분석",
-        "### 조치 방향",
+        "## 최종 RCA 테이블을 먼저 작성하고, 이후 장애 위치 분석과 조치 방향을 작성하세요.",
+        "섹션 제목은 자유롭게 사용해도 됩니다.",
     ]
 
     return "\n".join(lines)

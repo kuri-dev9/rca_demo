@@ -1264,10 +1264,13 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         if critical_enb:
             lines.append("### 집중 장애 eNB")
             for enb in critical_enb:
+                entity_id = enb.get("entity_id") or "unknown"
+                if entity_id == "unknown":
+                    continue  # entity_id 없는 항목은 출력 제외
                 success = enb.get("success", -1)
                 success_str = f"성공 {success}건" if success >= 0 else ""
                 lines.append(
-                    f"- eNB {enb['entity_id']}: "
+                    f"- eNB {entity_id}: "
                     f"{enb['failures']}건 실패 {success_str}, "
                     f"기여율 {enb['failure_contribution_pct']}%"
                 )
@@ -1310,16 +1313,13 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "   - 각 Flow의 시작/종료 메시지가 3GPP 절차상 어느 구간 장애인지 설명",
         "   - RAN 후보 / Core 후보 그룹의 타당성 검토 및 필요시 재분류",
         "",
-        "2. 영향도 평가 (아래 테이블로 출력)",
-        "   위 사전 분석 데이터의 수치를 근거로 판단하세요.",
-        "   건수가 많다고 High가 아닙니다.",
-        "   해당 Domain 장애가 서비스에 미치는 실질적 영향을 기준으로 판단하세요.",
-        "   Subscriber/UE 영향도는 반드시 가입자 분포의 반복 실패 비율을 근거로 판단하세요.",
-        "   | 구분 | 영향도 | 주요 근거 |",
-        "   |---|---|---|",
-        "   | RAN/Access | High/Medium/Low | 근거 |",
-        "   | Core Network | High/Medium/Low | 근거 |",
-        "   | Subscriber/UE | High/Medium/Low | 근거 |",
+        "2. 영향도 평가",
+        "   RAN/Access, Core Network, Subscriber/UE 각각에 대해",
+        "   High / Medium / Low 중 하나로 평가하고 데이터 기반 근거를 작성하세요.",
+        "   - 건수가 많다고 High가 아닙니다.",
+        "   - 해당 Domain 장애가 서비스에 미치는 실질적 영향을 기준으로 판단하세요.",
+        "   - Subscriber/UE는 반드시 가입자 분포의 반복 실패 비율을 근거로 판단하세요.",
+        "   - 사전 분석 데이터의 패턴 건수와 집중 장애 eNB 수치를 활용하세요.",
         "",
         "3. 최종 RCA",
         "   - 영향도 High인 Domain부터 장애 위치와 조치 방향 작성",

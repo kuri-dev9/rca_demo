@@ -12,6 +12,7 @@ from collections import Counter
 from typing import Any
 
 from app.rca.analyzer import RcaAnalysis
+from app.rca.spec_loader import get_call_type_name
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -126,6 +127,8 @@ def _compact_shared_failures(rows: list[dict[str, Any]], limit: int = 10) -> lis
     shared = sorted(rows, key=lambda row: _num(row.get("count")), reverse=True)[:limit]
     return [
         {
+            "call_type_code": row.get("call_type_code"),
+            "call_type": row.get("call_type"),
             "interface": row.get("interface"),
             "stage": row.get("stage"),
             "cause": row.get("cause"),
@@ -145,15 +148,23 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
         stage_counter[chain.failure_point] += 1
 
     rep_chains = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[int, str, str, str, str]] = set()
     for chain in analysis.failure_chains:
         item = {
+            "call_type_code": chain.call_type,
+            "call_type": get_call_type_name(chain.call_type),
             "procedure": chain.procedure,
             "interface": chain.failure_interface,
             "failure_point": chain.failure_point,
             "cause": chain.failure_cause_name,
         }
-        key = (item["procedure"], item["interface"], item["failure_point"], item["cause"])
+        key = (
+            item["call_type_code"],
+            item["procedure"],
+            item["interface"],
+            item["failure_point"],
+            item["cause"],
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -177,6 +188,8 @@ def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
             "failure_rate": round(analysis.failure_rate, 2),
         },
         "interface_failure_distribution": dict(analysis.interface_distribution),
+        "call_type_distribution": dict(analysis.call_type_distribution),
+        "call_type_failure_rate": analysis.call_type_failure_rate,
         "failure_stage_distribution": dict(stage_counter),
         "representative_chains": rep_chains,
         "entity_failure_contribution": {
@@ -647,112 +660,40 @@ def build_report_prompt_from_reasoning(
     ]
 
 
-def build_default_system_prompt() -> str:
-    return """\
-당신은 LTE/EPC 네트워크 RCA 분석 전문가입니다.
-
-반드시 입력 데이터만 사용합니다.
-반드시 한국어로 결과를 작성합니다.
-
-절대 금지:
-- 입력에 없는 장비 생성
-- 입력에 없는 IMSI 생성
-- 입력에 없는 Cause 생성
-- 입력에 없는 Interface 생성
-- 입력에 없는 Stage 생성
-- 입력에 없는 PLMN 생성
-- Cause / Interface / Stage 이름 변경
-- 대응조치 생성
-- 운영 권고 생성
-- 최적화 제안 생성
-- Vendor 문의 제안 생성
-
-다음 내용은 입력 데이터에 명시되어 있지 않으면 추론하지 않습니다:
-- 무선 품질 문제
-- 커버리지 문제
-- 간섭
-- DRX
-- 장비 버그
-- Software Issue
-- Hardware Issue
-- HSS 문제
-- Backhaul 문제
-- Vendor 문제
-- Resource 문제
-
-값 보존 예:
-- UE_not_responding 은 그대로 사용
-- VENDOR_SPECIFIC_CAUSE_15001 은 그대로 사용
-- S11_GTPv2C 는 그대로 사용
-
-RCA 판단 시 가장 중요하게 사용할 데이터:
-1. Entity Failure Contribution
-2. Shared Failure Observations
-3. Interface Failure Distribution
-4. Failure Stage Distribution
-5. Representative Chains
-6. Subscriber Summary
-
-Network-side 우세 조건:
-- 특정 MME/eNB에 Failure 집중
-- 높은 Failure Contribution
-- 동일 Interface/Stage/Cause 조합 반복
-- Shared Failure Observation 반복
-- affected_imsi_count 큼
-- affected_mme_count 큼
-- affected_enb_count 큼
-
-Subscriber-side 우세 조건:
-- 전체 가입자 중 반복 실패 가입자 비율이 높음
-- 상위 IMSI의 Total Failure Share가 높음
-- Multi-MME IMSI 비율이 높음
-- Multi-eNB IMSI 비율이 높음
-- Zero Success IMSI가 Subscriber Summary 내에서 의미 있게 집중됨
-
-주의:
-- 개별 IMSI 사례보다 전체 가입자 분포를 우선합니다.
-- repeated_failure_ratio가 낮으면 subscriber 집중 현상으로 해석하지 않습니다.
-- top_imsi_failure_share 단독으로 subscriber-side를 판단하지 않습니다.
-- affected_imsi_count 대비 repeated_failure_imsi_count 비율을 우선 고려합니다.
-- multi_mme_imsi_count, multi_enb_imsi_count는 보조 증거로만 사용합니다.
-
-판단 우선순위:
-1. Failure Contribution
-2. Shared Failure Observation
-3. Interface Distribution
-4. Stage Distribution
-5. Repeated Failure Ratio
-6. Top IMSI Failure Share
-7. Multi-MME IMSI
-8. Multi-eNB IMSI
-
-최종 RCA는 반드시 아래 중 하나만 사용:
-- Network-side Dominant
-- Subscriber-side Dominant
-- Mixed
-- Unknown
-
-신뢰도는 반드시 아래 중 하나만 사용:
-- High
-- Medium
-- Low
-
-필요 시 아래 항목만 작성합니다:
-- 우선 점검 장비
-- 우선 점검 Interface
-- 우선 점검 IMSI
-- 추가 확인 필요 데이터
-
-Markdown을 사용하고, HTML은 사용하지 않습니다."""
-
-
 def build_gemma4_system_prompt() -> str:
     return """\
-당신은 LTE/EPC 네트워크 장애 분석 전문가다.
-3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
-아래 제공된 데이터를 기반으로 장애 위치를 특정하고 조치 방향을 제시한다.
+당신은 LTE/EPC RCA 분석 엔진이다.
+
+반드시 입력 데이터만 사용한다.
 반드시 한국어로 작성한다.
-"""
+반드시 아래 Markdown 구조만 출력한다.
+
+## 최종 RCA
+
+| 항목 | 값 |
+|---|---|
+| RCA Domain | Core-side Dominant 또는 RAN/Access-side Dominant 또는 Subscriber/UE-side Dominant 또는 Mixed 또는 Unknown |
+| 신뢰도 | High 또는 Medium 또는 Low |
+| 주요 절차 | ATTACH / PAGING / SERVICE_REQUEST / TAU / DETACH 등 실제 관측된 절차 |
+| 주요 장애 위치 | Interface 기준 |
+
+## 판단 근거
+
+### Domain 판단 근거
+
+### 주요 절차 분석
+
+### 장애 위치 분석
+
+### 조치 방향
+
+중요:
+- Classification 출력 금지
+- Reasoning 출력 금지
+- Conclusion 출력 금지
+- Summary 출력 금지
+- 위 Markdown 구조 이외의 제목 생성 금지
+- 출력 첫 줄은 반드시 `## 최종 RCA` 로 시작한다."""
 
 
 def _format_gemma_user_message(observation: dict[str, Any]) -> str:
@@ -760,6 +701,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
     entity = observation.get("entity_failure_contribution", {})
     shared = observation.get("shared_failure_observations", [])
     subscriber = observation.get("subscriber_summary", {})
+    call_type_dist = observation.get("call_type_distribution", {})
 
     lines = []
 
@@ -772,6 +714,12 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "",
     ]
 
+    if call_type_dist:
+        lines.append("## 절차별 관측")
+        for call_type, count in call_type_dist.items():
+            lines.append(f"- {call_type}: {count:,}건")
+        lines.append("")
+
     # MME
     top_mme = entity.get("top_mme", [])
     if top_mme:
@@ -783,7 +731,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             )
             for p in mme.get("top_failure_patterns", []):
                 lines.append(
-                    f"  - {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
+                    f"  - {p.get('call_type', '-')} / {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
                 )
         lines.append("")
 
@@ -798,7 +746,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
             )
             for p in enb.get("top_failure_patterns", []):
                 lines.append(
-                    f"  - {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
+                    f"  - {p.get('call_type', '-')} / {p['interface']} / {p['stage']} / {p['cause']}: {p['count']}건"
                 )
         lines.append("")
 
@@ -807,7 +755,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         lines.append("## 반복 장애 패턴")
         for s in shared:
             lines.append(
-                f"- {s['interface']} / {s['stage']} / {s['cause']}: "
+                f"- {s.get('call_type', '-')} / {s['interface']} / {s['stage']} / {s['cause']}: "
                 f"{s['count']}건, "
                 f"영향 IMSI {s['affected_imsi_count']}명, "
                 f"MME {s['affected_mme_count']}개, "
@@ -832,23 +780,24 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "---",
         "",
         "위 데이터를 기반으로 아래 순서로 분석하세요.",
-        "데이터에 있는 장비명, interface, stage, cause, 수치를 그대로 인용하세요.",
+        "데이터에 있는 call_type, 장비명, interface, stage, cause, 수치를 그대로 인용하세요.",
         "데이터에 없는 값은 생성하지 마세요.",
         "",
-        "## 최종 판단",
-        "- 판단: Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나",
-        "- 신뢰도: High / Medium / Low 중 하나",
-        "- 근거: 위 데이터 기준 핵심 근거 2~3문장",
+        "출력 첫 줄은 반드시 `## 최종 RCA` 로 시작하세요.",
+        "RCA Domain은 Core-side Dominant / RAN/Access-side Dominant / Subscriber/UE-side Dominant / Mixed / Unknown 중 하나만 사용하세요.",
+        "Core-side는 S6a, S11, MME, SGW, PGW, HSS 관련 관측이 우세한 경우입니다.",
+        "RAN/Access-side는 eNB, S1MME, S1AP, Radio 관련 관측이 우세한 경우입니다.",
+        "Subscriber/UE-side는 UE_not_responding, Unable_to_page_UE, IMSI 반복 실패 관측이 우세한 경우입니다.",
+        "주요 절차는 입력에 있는 call_type만 사용하세요.",
+        "Classification, Reasoning, Conclusion, Summary 제목은 사용하지 마세요.",
         "",
-        "## 장애 위치 분석",
-        "각 반복 패턴(interface / stage / cause)에 대해:",
-        "- 3GPP 절차상 어느 노드 간 구간인지",
-        "- 해당 cause의 의미와 장애 발생 지점",
-        "- 집중된 장비(위 데이터의 entity_id 직접 인용)와의 연관성",
-        "",
-        "## 조치 방향",
-        "- [장비 또는 인터페이스]: 확인 항목",
-        "- 위 데이터에 근거한 항목만 작성",
+        "출력에는 반드시 다음 섹션만 사용하세요.",
+        "## 최종 RCA",
+        "## 판단 근거",
+        "### Domain 판단 근거",
+        "### 주요 절차 분석",
+        "### 장애 위치 분석",
+        "### 조치 방향",
     ]
 
     return "\n".join(lines)
@@ -866,50 +815,7 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
             for k, v in observation.items()
             if k not in {"subscriber_cause_distribution", "subscriber_plmn_distribution"}
         }
-    is_gemma = "gemma" in (model_name or "").lower()
-
-    if is_gemma:
-        return [
-            {"role": "system", "content": build_gemma4_system_prompt()},
-            {"role": "user", "content": _format_gemma_user_message(observation)},
-        ]
-
-    system = build_default_system_prompt()
-    ctx_json = json.dumps(observation, ensure_ascii=False, separators=(',', ':'))
-    user = f"""\
-다음 xDR 관측 데이터를 분석하여 RCA 판단 결과를 한국어로 작성하세요.
-
-[관측 데이터]
-{ctx_json}
-
-[출력 형식]
-
-## 최종 RCA
-
-| 항목 | 값 |
-|---|---|
-| 판단 | Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나 |
-| 신뢰도 | High / Medium / Low 중 하나 |
-
-## 판단 근거
-
-### Network-side 근거
-- 입력 데이터의 Entity Failure Contribution / Shared Failure Observations / Interface / Stage 기반 근거만 작성
-
-### Subscriber-side 근거
-- 입력 데이터의 Subscriber Summary 기반 근거만 작성
-
-### 반대 근거 또는 제한 사항
-- 판단을 약하게 만드는 입력 데이터 기반 근거만 작성
-
-## 우선 확인 대상
-
-- 우선 점검 장비:
-- 우선 점검 Interface:
-- 우선 점검 IMSI:
-- 추가 확인 필요 데이터:
-"""
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
+        {"role": "system", "content": build_gemma4_system_prompt()},
+        {"role": "user", "content": _format_gemma_user_message(observation)},
     ]

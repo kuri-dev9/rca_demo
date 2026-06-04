@@ -423,7 +423,7 @@ def _entity_failure_contributions(
     cause_df = (
         failure_lf
         .filter(pl.col(entity_col).cast(pl.Utf8) != "")
-        .group_by([entity_col, "first_error_interface", "first_error_message", "first_error_cause"])
+        .group_by([entity_col, "call_type", "first_error_interface", "first_error_message", "first_error_cause"])
         .len()
         .filter(pl.col("len") >= min_cause_count)
         .sort([entity_col, "len"], descending=[False, True])
@@ -432,10 +432,13 @@ def _entity_failure_contributions(
     causes_by_entity: dict[str, list[dict]] = {}
     for row in cause_df.iter_rows(named=True):
         entity_id = str(row[entity_col])
+        call_type_code = int(row["call_type"] or 0)
         fi = int(row["first_error_interface"] or 0)
         fm = int(row["first_error_message"] or 0)
         fc = int(row["first_error_cause"] or 0)
         causes_by_entity.setdefault(entity_id, []).append({
+            "call_type_code": call_type_code,
+            "call_type": get_call_type_name(call_type_code),
             "interface": get_interface_name(fi),
             "stage": _interface_msg_to_stage(fi, fm),
             "cause": get_cause_name(fi, fc),
@@ -774,11 +777,11 @@ def analyze(records: pl.LazyFrame | pl.DataFrame | List[XdrRecord], parse_stats:
             })
         del enb_bl_df
 
-        # Shared failure signatures: group by (interface, message, cause), count distinct devices
+        # Shared failure signatures: group by (call_type, interface, message, cause), count distinct devices
         sig_df = (
             failure_lf
             .filter(pl.col("first_error_interface") != 0)
-            .group_by(["first_error_interface", "first_error_message", "first_error_cause"])
+            .group_by(["call_type", "first_error_interface", "first_error_message", "first_error_cause"])
             .agg([
                 pl.len().alias("count"),
                 pl.col("imsi").n_unique().alias("affected_imsi_count"),
@@ -786,15 +789,18 @@ def analyze(records: pl.LazyFrame | pl.DataFrame | List[XdrRecord], parse_stats:
                 pl.col("first_enb_id").n_unique().alias("affected_enb_count"),
             ])
             .filter(pl.col("count") > 1)
-            .sort(["first_error_interface", "first_error_message", "first_error_cause"], descending=False)
+            .sort("count", descending=True)
             .head(10)
             .collect()
         )
         for row in sig_df.iter_rows(named=True):
+            call_type_code = int(row["call_type"] or 0)
             fi = int(row["first_error_interface"])
             fm = int(row["first_error_message"])
             fc = int(row["first_error_cause"])
             shared_failure_signatures.append({
+                "call_type_code": call_type_code,
+                "call_type": get_call_type_name(call_type_code),
                 "interface": get_interface_name(fi),
                 "stage": _interface_msg_to_stage(fi, fm),
                 "cause": get_cause_name(fi, fc),

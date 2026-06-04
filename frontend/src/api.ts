@@ -159,7 +159,8 @@ export interface RcaResult {
   top_root_causes: Array<{ root_cause: string; count: number; category: string; severity: string; confidence: number }>;
   failure_chains: Array<{
     procedure: string;
-    call_type: number;
+    call_type_code: number;
+    call_type: string;
     failure_point: string;
     failure_interface: string;
     failure_message: string;

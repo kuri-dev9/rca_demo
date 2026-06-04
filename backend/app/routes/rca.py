@@ -29,6 +29,7 @@ from app.models import Conversation, Message
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
 from app.rca.parser import parse_file
+from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
@@ -80,7 +81,7 @@ def _append_entity_contribution_section(lines: list[str], title: str, rows: list
     for row in rows:
         patterns = row.get("top_failure_patterns", [])
         pattern_text = ", ".join(
-            f"{p.get('cause')}({p.get('count')})"
+            f"{p.get('call_type') or '-'} / {p.get('cause')}({p.get('count')})"
             for p in patterns
             if p.get("cause") and p.get("count") is not None
         ) or "-"
@@ -202,6 +203,16 @@ def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
         f"| Burst 감지 | {burst_val} |",
     ]
 
+    if analysis.call_type_distribution:
+        lines += [
+            " ",
+            "### Call Type 분포",
+            "| Call Type | 건수 | 실패율 |",
+            "|---|---:|---:|",
+        ]
+        for call_type, cnt in sorted(analysis.call_type_distribution.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"| {call_type} | {cnt:,} | {analysis.call_type_failure_rate.get(call_type, 0.0)}% |")
+
     # Interface Failure 분포
     if analysis.interface_distribution:
         lines += [
@@ -238,12 +249,12 @@ def _analysis_to_markdown(analysis: RcaAnalysis) -> str:
         lines += [
             " ",
             "### 유형별 실패 통계",
-            "| Interface | Stage | Cause | Count | IMSI | MME | eNB |",
-            "|---|---|---|---|---|---|---|",
+            "| Call Type | Interface | Stage | Cause | Count | IMSI | MME | eNB |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for s in analysis.shared_failure_signatures[:8]:
             lines.append(
-                f"| {s['interface']} | {s['stage']} | {s['cause']} "
+                f"| {s.get('call_type') or '-'} | {s['interface']} | {s['stage']} | {s['cause']} "
                 f"| {s['count']} | {s['affected_imsi_count']} "
                 f"| {s['affected_mme_count']} | {s['affected_enb_count']} |"
             )
@@ -257,7 +268,8 @@ def _analysis_to_response(analysis: RcaAnalysis, conv_id: int) -> dict[str, Any]
     for c in analysis.failure_chains[:20]:
         chains_raw.append({
             "procedure": c.procedure,
-            "call_type": c.call_type,
+            "call_type_code": c.call_type,
+            "call_type": get_call_type_name(c.call_type),
             "failure_point": c.failure_point,
             "failure_interface": c.failure_interface,
             "failure_message": c.failure_message,

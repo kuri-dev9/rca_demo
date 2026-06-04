@@ -752,15 +752,17 @@ def build_gemma4_system_prompt() -> str:
 3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
 
 역할:
-- 입력 데이터의 interface / stage / cause 조합으로 장애 발생 위치를 특정한다.
-- 장애 위치별로 3GPP 절차상 어느 노드, 어느 단계에서 문제가 발생했는지 설명한다.
-- 근거 있는 조치 방향을 제시한다.
+- 입력 데이터의 interface / stage / cause 조합으로 3GPP 절차상 장애 발생 위치를 특정한다.
+- 장애 위치별로 어느 노드 간 구간에서 문제가 발생했는지 설명한다.
+- 데이터에 근거한 조치 방향을 제시한다.
 
 반드시 지킬 것:
-- 입력 데이터에 없는 장비, IMSI, Cause, Interface, Stage 이름을 생성하지 않는다.
-- Cause / Interface / Stage 이름을 임의로 변경하거나 번역하지 않는다.
-  예: UE_not_responding → UE_not_responding (변경 금지)
-  예: S11_GTPv2C → S11_GTPv2C (변경 금지)
+- 분석 결과에 입력 데이터의 값을 반드시 직접 인용한다.
+  예: entity_id → "MME 47", "eNB bo3reaGROYftluYm2HmjZQ=="
+  예: cause → "UE_not_responding", "VENDOR_SPECIFIC_CAUSE_15001" (번역/변경 금지)
+  예: interface → "S11_GTPv2C", "S6a_Diameter" (번역/변경 금지)
+  예: 수치 → failure_contribution_pct, count 등을 그대로 인용
+- 입력 데이터에 없는 장비, IMSI, Cause, Interface, Stage를 생성하지 않는다.
 - 입력 데이터에 없는 수치를 생성하지 않는다.
 - 반드시 한국어로 작성한다.
 """
@@ -818,20 +820,26 @@ def build_rca_messages(summary: dict[str, Any], model_name: str = "") -> list[di
     if is_gemma:
         user += """
 
-분석 시 아래 순서로 작성하세요:
+아래 순서로 작성하세요.
+각 항목에 입력 데이터의 값(entity_id, interface, stage, cause, 수치)을 반드시 직접 인용하세요.
 
-1. 최종 판단
-   - Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나
-   - 신뢰도: High / Medium / Low
+## 최종 판단
+- 판단: Network-side Dominant / Subscriber-side Dominant / Mixed / Unknown 중 하나
+- 신뢰도: High / Medium / Low 중 하나
+- 판단 요약: 2~3문장으로 핵심 근거만 서술
 
-2. 장애 위치 분석
-   - 각 interface + stage + cause 조합이 3GPP 절차상 어느 노드 간 구간에서 발생한 것인지 설명
-   - 집중도가 높은 장비(MME/eNB/SGW)와 해당 장비에서 반복되는 패턴 설명
+## 장애 위치 분석
 
-3. 조치 방향
-   - 장애 위치별로 확인해야 할 사항
-   - 입력 데이터에 근거한 항목만 작성
-   - 추측성 권고 금지
+각 interface + stage + cause 조합에 대해:
+- 3GPP 절차상 어느 노드 간 구간인지
+- 해당 cause의 의미와 장애 발생 지점
+- 집중도가 높은 장비(entity_id 직접 인용)에서 반복되는 패턴
+
+## 조치 방향
+
+장애 위치별 확인 사항을 아래 형식으로 작성:
+- [장비/인터페이스]: 확인 항목
+입력 데이터에 근거한 항목만 작성할 것.
 """
 
     return [

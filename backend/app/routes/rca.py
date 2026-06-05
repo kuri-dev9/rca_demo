@@ -407,12 +407,15 @@ async def stream_rca_reasoning(
                     step_response = "".join(step_response_parts)
                     step_results.append(step_response)
                     if loop_mode and step_index < total_steps - 1:
+                        # STEP 완료 이벤트 — 프론트에서 현재 streamingContent를 messages에 flush
+                        yield f"data: {json.dumps({'step_done': True, 'step_index': step_index})}\n\n"
                         separator = "\n\n"
                         response_parts.append(separator)
                         yield f"data: {json.dumps({'token': separator})}\n\n"
                     del step_response_parts, step_response
         except httpx.HTTPError as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            step_label = loop_step_labels[step_index] if loop_mode else "RCA"
+            yield f"data: {json.dumps({'error': f'[{step_label}] {str(exc)}'})}\n\n"
             return
 
         full_response = "".join(response_parts)

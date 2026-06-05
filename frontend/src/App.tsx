@@ -310,6 +310,25 @@ function App() {
       },
       (prompt) => {
         appendStreamingDebugPrompt(prompt);
+      },
+      () => {
+        // STEP 완료 — 현재 streamingContent를 messages에 flush하고 초기화
+        const promptSnapshot = [...streamingDebugPromptsRef.current];
+        setStreamingContent((prev) => {
+          if (prev) {
+            const stepMsg: Message = {
+              id: Date.now() + Math.random(),
+              conversation_id: convId,
+              role: 'assistant',
+              content: prev,
+              created_at: new Date().toISOString(),
+              debug_prompts: promptSnapshot,
+            };
+            setMessages((msgs) => [...msgs, stepMsg]);
+          }
+          return '';
+        });
+        resetStreamingDebugPrompts();
       }
     );
     abortRef.current = controller;

@@ -274,6 +274,7 @@ export function streamRcaReasoning(
   onDone: () => void,
   onError: (err: string) => void,
   onPromptDebug?: (prompt: PromptDebug) => void,
+  onStepDone?: () => void,
 ): AbortController {
   const controller = new AbortController();
 
@@ -310,6 +311,7 @@ export function streamRcaReasoning(
             if (data.done) onDone();
             if (data.error) onError(data.error);
             if (data.prompt_debug) onPromptDebug?.(data.prompt_debug);
+            if (data.step_done) onStepDone?.();
           } catch {}
         }
       }

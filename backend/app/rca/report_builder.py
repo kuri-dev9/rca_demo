@@ -904,9 +904,9 @@ def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, 
     entity_id, 건수, 기여율 전달 안 함 — 3GPP 해석에 집중.
     """
     shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
-    failure_flow = _get_data(compact_rca_ir, "failure_flow", [])
 
-    # 에러 조합만 추출 (중복 제거, 건수/장비 제외)
+    # failure_flow는 loop mode에서 제외
+    # gemma4가 유사한 first/last 패턴을 반복 출력하는 루프 버그 유발
     error_set: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for s in shared:
@@ -926,21 +926,8 @@ def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, 
             "cause": s.get("cause", "-"),
         })
 
-    # Failure Flow의 first→last 전파 경로도 포함
-    flows: list[dict[str, str]] = []
-    for flow in failure_flow:
-        if not flow.get("is_single_node", True):
-            flows.append({
-                "call_type": flow.get("call_type", "-"),
-                "first_message": flow.get("first_message", "-"),
-                "first_cause": flow.get("first_cause", "-"),
-                "last_message": flow.get("last_message", "-"),
-                "last_cause": flow.get("last_cause", "-"),
-            })
-
     payload = {
         "error_list": error_set,
-        "failure_flows": flows,
     }
     return build_loop_step_messages("step1", payload)
 

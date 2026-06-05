@@ -816,12 +816,12 @@ STEP1~3의 분석 결과를 실제 장비 데이터에 매핑하여
 수행:
 1. STEP3의 영향도 평가를 실제 장비 데이터와 매핑
 2. 실제 entity_id, 건수, 기여율을 인용하여 장애 위치 구체화
-3. 조치 방향 작성 — 반드시 실제 장비/인터페이스 기준으로만
+3. 조치 방향 작성
 
 출력 형식:
 - 영향도 요약: RAN/Access, Core Network, Subscriber/UE 각각의 영향도와 근거
 - 장애 위치: 실제 장비명과 인터페이스 기반으로 특정
-- 조치 방향: 실제 장비/인터페이스 기준으로만
+- 조치 방향: 아래 허용 목록의 장비/인터페이스 기준으로만 작성
 
 금지:
 - STEP1~3 내용을 그대로 반복 출력 금지
@@ -829,6 +829,16 @@ STEP1~3의 분석 결과를 실제 장비 데이터에 매핑하여
 - 실제 데이터에 없는 수치 생성 금지
 - 확정할 수 없는 내용을 확정적으로 기술 금지
   → 반드시 "가능성" 또는 "추가 확인 필요"로 표현
+
+조치 방향 작성 규칙:
+- 아래 허용 목록에 있는 장비/인터페이스만 언급한다
+- 허용 목록에 없는 장비명, 인터페이스명, 기술 용어는 작성하지 않는다
+- Drive Test, 로드 밸런싱, RRC, X2, S5/S8 등
+  실제 데이터에 없는 기술 용어는 작성하지 않는다
+- 확인 항목은 "추가 확인 필요" 또는 "가능성"으로 표현한다
+
+[허용 장비 및 인터페이스 목록]
+{allowed_list}
 
 [STEP1~3 분석 결과]
 {step1_result}
@@ -857,6 +867,7 @@ def build_loop_step_messages(
     step2_result: str = "",
     step3_result: str = "",
     device_payload: str = "",
+    allowed_list: str = "",
 ) -> list[dict[str, str]]:
     template = LOOP_STEP_TEMPLATES[step_name]
 
@@ -876,6 +887,7 @@ def build_loop_step_messages(
             step2_result=step2_result,
             step3_result=step3_result,
             device_payload=device_payload,
+            allowed_list=allowed_list,
         )
     else:
         user_content = template
@@ -1010,12 +1022,36 @@ def build_loop_step4_messages(
 
     device_payload_text = json.dumps(device_data, ensure_ascii=False, separators=(",", ":"))
 
+    # 조치 방향 작성 시 허용된 장비/인터페이스 목록 사전 생성
+    allowed_items: list[str] = []
+
+    for e in device_data.get("top_mme", []):
+        eid = e.get("entity_id")
+        if eid:
+            allowed_items.append(f"MME {eid}")
+
+    for e in device_data.get("top_enb", []):
+        eid = e.get("entity_id")
+        if eid:
+            allowed_items.append(f"eNB {eid}")
+
+    shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
+    iface_set: set[str] = set()
+    for s in shared:
+        iface = s.get("interface")
+        if iface:
+            iface_set.add(iface)
+    allowed_items.extend(sorted(iface_set))
+
+    allowed_list_text = "\n".join(f"- {item}" for item in allowed_items)
+
     return build_loop_step_messages(
         "step4",
         step1_result=step1_result,
         step2_result=step2_result,
         step3_result=step3_result,
         device_payload=device_payload_text,
+        allowed_list=allowed_list_text,
     )
 
 

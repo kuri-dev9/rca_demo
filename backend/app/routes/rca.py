@@ -358,7 +358,7 @@ async def stream_rca_reasoning(
         step_results: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                loop_step_labels = ["STEP 1", "STEP 2", "STEP 3"]
+                loop_step_labels = ["STEP 1", "STEP 2", "STEP 3", "STEP 4"]
                 total_steps = len(loop_step_labels) if loop_mode else 1
                 for step_index in range(total_steps):
                     call_messages = (

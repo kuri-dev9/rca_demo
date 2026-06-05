@@ -714,279 +714,339 @@ def build_reasoning_messages(observability: dict[str, Any]) -> list[dict[str, st
     ]
 
 
-STEP_SYSTEM_PROMPT = """
-당신의 역할은 RCA 분석가가 아니다.
+STEP_SYSTEM_PROMPT = """\
+당신은 LTE/EPC 네트워크 장애 분석 전문가다.
+3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
+반드시 한국어로 작성한다.
 
-당신의 역할은 입력 데이터를 정렬하고 관찰 결과를 추출하는 것이다.
-
-중요:
-- 입력에 없는 값 생성 금지
-- 숫자 계산 금지
-- 비율 계산 금지
-- 원인 추론 금지
-- 의미 해석 금지
-- Cause 이름 변경 금지
-- Interface 이름 변경 금지
-- Stage 이름 변경 금지
-
-반드시 입력값 그대로 사용한다.
-
-예:
-UE_not_responding -> UE_not_responding
-VENDOR_SPECIFIC_CAUSE_15001 -> VENDOR_SPECIFIC_CAUSE_15001
-S11_GTPv2C -> S11_GTPv2C
-
-STEP1, STEP2에서는 설명하지 말고 관찰 결과만 작성한다.
-
-최종 판단은 STEP3에서만 수행한다.
+공통 규칙:
+- 각 STEP에서 지시한 역할만 수행한다.
+- 다음 STEP의 역할을 미리 수행하지 않는다.
+- 입력에 없는 값을 생성하지 않는다.
+- Interface / Message / Cause 이름을 번역하거나 변경하지 않는다.
 """
 
 
-STEP1_TEMPLATE = """
-STEP 1. 네트워크 증거
+STEP1_TEMPLATE = """\
+STEP 1: 에러 해석
 
-목표:
-네트워크 관련 데이터를 정렬하여 관찰 결과만 추출한다.
-
-절대 하지 말 것:
-- 원인 추론
-- 의미 해석
-- RCA 판단
-- 대응조치 작성
-- 가입자 언급
+역할:
+입력된 각 에러(interface / message / cause 조합)가
+3GPP 절차상 어느 노드 간 구간에서 발생하는 에러인지 설명한다.
 
 수행:
-1. Failure Contribution 상위 장비 출력
-2. Failure Count 상위 Cause 출력
-3. Failure Count 상위 Interface 출력
-4. Failure Count 상위 Stage 출력
-5. 동일 Cause가 여러 장비에서 반복되는 경우만 기록
+- 각 에러 조합에 대해 아래를 작성한다:
+  - 3GPP 절차상 노드 간 구간 (예: MME-HSS, MME-SGW, eNB-MME)
+  - 해당 message/cause의 3GPP상 의미
+  - 장애 발생 가능 지점
 
-출력 형식:
-## Top Devices
+금지:
+- 실제 장비명(entity_id) 언급 금지
+- 건수/비율 계산 금지
+- 원인 확정 금지 — 확정할 수 없으면 "가능성" 또는 "추가 확인 필요"로 표현
+- 조치 방향 작성 금지
 
-- Entity:
-- Failure Contribution:
-
-## Top Causes
-
-- Cause:
-- Count:
-
-## Top Interfaces
-
-- Interface:
-- Count:
-
-## Top Stages
-
-- Stage:
-- Count:
-
-## Repeated Device Patterns
-
-- ...
-
-[STEP 1 입력]
+[입력 에러 목록]
 {payload}
 """
 
-STEP2_TEMPLATE = """
-STEP 2. 가입자 증거
+STEP2_TEMPLATE = """\
+STEP 2: 상관 분석
 
-목표:
-가입자 관련 데이터를 정렬하여 관찰 결과만 추출한다.
-전체 실패 건수 대비 IMSI의 Total Failure Share를 우선 평가한다.
-IMSI Failure Rate는 보조 지표로 사용한다.
-IMSI Failure Rate가 100%라도 Total Failure Share가 낮으면 가입자 집중도는 낮게 평가한다.
+역할:
+STEP1의 에러 해석 결과를 기반으로
+에러 간 인과관계와 독립/연관 여부를 분석한다.
 
-절대 하지 말 것:
+수행:
+- 에러들을 그룹으로 분류한다:
+  - 동일 절차 내에서 연쇄적으로 발생하는 에러 그룹
+  - 서로 독립적인 에러 그룹
+- 각 그룹에 대해:
+  - 공통 원인 가능성이 있는지
+  - 한 에러가 다른 에러를 유발했을 가능성이 있는지
 
-- 원인 추론
-- 이동성 문제 추정
-- Network-side 판단
-- RCA 판단
-- 대응조치 작성
+금지:
+- 실제 장비명(entity_id) 언급 금지
+- 건수/비율 언급 금지
+- 장애 위치 확정 금지
+- 조치 방향 작성 금지
+- STEP1 내용을 그대로 반복 출력 금지
 
-우선순위:
-
-1. Total Failure Share
-2. IMSI Failure Rate
-3. Repeated Failure IMSI
-4. Multi-MME IMSI
-5. Multi-eNB IMSI
-6. Zero Success IMSI
-
-출력 형식:
-
-## Top IMSI
-
-- IMSI:
-- Failures:
-- IMSI Failure Rate:
-- Total Failure Share:
-
-## Repeated Failure IMSI
-
-- ...
-
-## Multi-MME IMSI
-
-- ...
-
-## Multi-eNB IMSI
-
-- ...
-
-## Zero Success IMSI
-
-- ...
-
-[STEP 2 입력]
-{payload}
+[STEP1 결과]
+{step1_result}
 """
 
-STEP3_TEMPLATE = """
-STEP 3. 최종 RCA
+STEP3_TEMPLATE = """\
+STEP 3: 장애 위치 확정
 
-STEP1과 STEP2 결과만 사용한다.
+역할:
+STEP1 에러 해석과 STEP2 상관 분석을 기반으로
+장애가 발생한 노드/인터페이스를 특정한다.
 
-새로운 분석 금지.
-새로운 데이터 생성 금지.
-STEP1, STEP2 내용을 반복 출력하지 않는다.
+수행:
+- 각 에러 그룹별로 장애 발생 노드/인터페이스를 특정한다
+- RAN/Access 영역과 Core Network 영역을 구분한다
+- Subscriber/UE 영역 관련 여부를 판단한다
+- 각 영역별 영향도를 High / Medium / Low 로 평가한다:
+  - 집중 장애(특정 구간 집중) → High 가능성
+  - 분산 장애(여러 구간) → Medium 가능성
+  - 단발성 또는 미미한 영향 → Low
 
-판단 우선순위:
+금지:
+- 실제 장비명(entity_id) 언급 금지
+- 건수/비율 언급 금지
+- 조치 방향 작성 금지
+- STEP1, STEP2 내용을 그대로 반복 출력 금지
+- 확정할 수 없는 내용을 확정적으로 기술 금지
 
-1. Device Concentration
-2. Interface Concentration
-3. Stage Concentration
-4. Total Failure Share
-5. Repeated Failure IMSI
-6. Multi-MME IMSI
-7. Multi-eNB IMSI
-8. IMSI Failure Rate
+[STEP1 결과]
+{step1_result}
 
-판단 규칙:
-- IMSI Failure Rate가 100%여도 Total Failure Share가 낮으면 Subscriber-side 근거를 약하게 본다.
-- 특정 IMSI의 Failure Rate보다 전체 실패 중 차지하는 비중인 Total Failure Share를 우선한다.
-- 예: IMSI Failure Rate = 100%, Total Failure Share = 7.9% 는 가입자 집중도 낮음.
-- 예: IMSI Failure Rate = 100%, Total Failure Share = 45% 는 가입자 집중도 높음.
+[STEP2 결과]
+{step2_result}
+"""
 
-출력:
+STEP4_TEMPLATE = """\
+STEP 4: 최종 레포트
 
-## 판단
+역할:
+STEP1~3의 분석 결과를 실제 장비 데이터에 매핑하여
+운영자용 최종 RCA 보고서를 작성한다.
 
-Network-side Dominant
-또는
-Subscriber-side Dominant
+수행:
+1. STEP3의 영향도 평가를 실제 장비 데이터와 매핑
+2. 실제 entity_id, 건수, 기여율을 인용하여 장애 위치 구체화
+3. 조치 방향 작성 — 반드시 실제 장비/인터페이스 기준으로만
 
-## 신뢰도
+출력 형식:
+- 영향도 요약: RAN/Access, Core Network, Subscriber/UE 각각의 영향도와 근거
+- 장애 위치: 실제 장비명과 인터페이스 기반으로 특정
+- 조치 방향: 실제 장비/인터페이스 기준으로만
 
-High
-Medium
-Low
+금지:
+- STEP1~3 내용을 그대로 반복 출력 금지
+- 실제 장비 데이터에 없는 entity_id 생성 금지
+- 실제 데이터에 없는 수치 생성 금지
+- 확정할 수 없는 내용을 확정적으로 기술 금지
+  → 반드시 "가능성" 또는 "추가 확인 필요"로 표현
 
-## 우선 점검 대상
+[STEP1~3 분석 결과]
+{step1_result}
 
-MME:
-eNB:
-IMSI:
+{step2_result}
 
-## 판단 근거
+{step3_result}
 
-- Device:
-- Interface:
-- Stage:
-- IMSI:
-
-## 대응조치
-
-- 즉시 확인 장비:
-- 즉시 확인 인터페이스:
-- 즉시 확인 가입자:
-
-[STEP 3 입력]
-{payload}
+[실제 장비 데이터]
+{device_payload}
 """
 
 LOOP_STEP_TEMPLATES = {
     "step1": STEP1_TEMPLATE,
     "step2": STEP2_TEMPLATE,
     "step3": STEP3_TEMPLATE,
+    "step4": STEP4_TEMPLATE,
 }
 
 
-def build_loop_step_messages(step_name: str, payload: dict[str, Any]) -> list[dict[str, str]]:
+def build_loop_step_messages(
+    step_name: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    step1_result: str = "",
+    step2_result: str = "",
+    step3_result: str = "",
+    device_payload: str = "",
+) -> list[dict[str, str]]:
     template = LOOP_STEP_TEMPLATES[step_name]
-    payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    if step_name == "step1":
+        payload_text = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
+        user_content = template.format(payload=payload_text)
+    elif step_name == "step2":
+        user_content = template.format(step1_result=step1_result)
+    elif step_name == "step3":
+        user_content = template.format(
+            step1_result=step1_result,
+            step2_result=step2_result,
+        )
+    elif step_name == "step4":
+        user_content = template.format(
+            step1_result=step1_result,
+            step2_result=step2_result,
+            step3_result=step3_result,
+            device_payload=device_payload,
+        )
+    else:
+        user_content = template
+
     return [
         {"role": "system", "content": STEP_SYSTEM_PROMPT},
-        {"role": "user", "content": template.format(payload=payload_text)},
+        {"role": "user", "content": user_content},
     ]
 
 
 def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    STEP1 입력: 에러 목록만.
+    entity_id, 건수, 기여율 전달 안 함 — 3GPP 해석에 집중.
+    """
+    shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
+    failure_flow = _get_data(compact_rca_ir, "failure_flow", [])
+
+    # 에러 조합만 추출 (중복 제거, 건수/장비 제외)
+    error_set: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for s in shared:
+        key = (
+            str(s.get("interface", "")),
+            str(s.get("message", "")),
+            str(s.get("cause", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        error_set.append({
+            "call_type": s.get("call_type", "-"),
+            "interface": s.get("interface", "-"),
+            "message": s.get("message", "-"),
+            "stage": s.get("stage", "-"),
+            "cause": s.get("cause", "-"),
+        })
+
+    # Failure Flow의 first→last 전파 경로도 포함
+    flows: list[dict[str, str]] = []
+    for flow in failure_flow:
+        if not flow.get("is_single_node", True):
+            flows.append({
+                "call_type": flow.get("call_type", "-"),
+                "first_message": flow.get("first_message", "-"),
+                "first_cause": flow.get("first_cause", "-"),
+                "last_message": flow.get("last_message", "-"),
+                "last_cause": flow.get("last_cause", "-"),
+            })
+
     payload = {
-        "entity_failure_contribution": _get_data(compact_rca_ir, "entity_failure_contribution", {}),
-        "shared_failure_observations": _get_data(compact_rca_ir, "shared_failure_observations", []),
-        "interface_failure_distribution": _get_data(compact_rca_ir, "interface_failure_distribution", {}),
-        "failure_stage_distribution": _get_data(compact_rca_ir, "failure_stage_distribution", {}),
+        "error_list": error_set,
+        "failure_flows": flows,
     }
     return build_loop_step_messages("step1", payload)
 
 
-def build_loop_step2_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
-    patterns = sorted(
-        _get_data(compact_rca_ir, "subscriber_failure_patterns", []),
-        key=lambda row: _num(row.get("total_failure_share")),
-        reverse=True,
-    )[:5]
-    compact_patterns = [
-        {
-            "imsi_prefix": row.get("imsi_prefix", ""),
-            "attempts": row.get("attempts", 0),
-            "failures": row.get("failures", 0),
-            "imsi_failure_rate": row.get("imsi_failure_rate", 0.0),
-            "total_failure_share": row.get("total_failure_share", 0.0),
-            "mme_count": row.get("mme_count", 0),
-            "enb_count": row.get("enb_count", 0),
-            "zero_success": row.get("zero_success", False),
-        }
-        for row in patterns
-    ]
-    payload = {
-        "statistics": _get_data(compact_rca_ir, "statistics", {}),
-        "subscriber_failure_patterns": compact_patterns,
-        "subscriber_mobility_summary": _get_data(compact_rca_ir, "subscriber_mobility_summary", {}),
-    }
-    return build_loop_step_messages("step2", payload)
+def build_loop_step2_messages(
+    compact_rca_ir: dict[str, Any],
+    step1_result: str,
+) -> list[dict[str, str]]:
+    """STEP2 입력: STEP1 결과만."""
+    return build_loop_step_messages(
+        "step2",
+        step1_result=step1_result,
+    )
 
 
 def build_loop_step3_messages(
     compact_rca_ir: dict[str, Any],
-    network_evidence: str,
-    subscriber_evidence: str,
+    step1_result: str,
+    step2_result: str,
 ) -> list[dict[str, str]]:
-    payload = {
-        "statistics": compact_rca_ir.get("statistics", {}),
-        "network_evidence": network_evidence,
-        "subscriber_evidence": subscriber_evidence,
+    """STEP3 입력: STEP1+2 결과만."""
+    return build_loop_step_messages(
+        "step3",
+        step1_result=step1_result,
+        step2_result=step2_result,
+    )
+
+
+def build_loop_step4_messages(
+    compact_rca_ir: dict[str, Any],
+    step1_result: str,
+    step2_result: str,
+    step3_result: str,
+) -> list[dict[str, str]]:
+    """
+    STEP4 입력: STEP1~3 결과 + 실제 장비 데이터.
+    여기서만 entity_id, 건수, 기여율 전달.
+    """
+    entity = _get_data(compact_rca_ir, "entity_failure_contribution", {})
+    hints = _get_data(compact_rca_ir, "rca_hints", {})
+    subscriber = _get_data(compact_rca_ir, "subscriber_summary", {})
+    stats = _get_data(compact_rca_ir, "statistics", {})
+
+    device_data: dict[str, Any] = {
+        "statistics": {
+            "failure_count": stats.get("failure_count", 0),
+            "failure_rate": stats.get("failure_rate", 0),
+        },
+        "top_mme": [
+            {
+                "entity_id": e["entity_id"],
+                "failures": e["failures"],
+                "failure_contribution_pct": e["failure_contribution_pct"],
+                "top_failure_patterns": e.get("top_failure_patterns", []),
+            }
+            for e in entity.get("top_mme", [])
+            if e.get("entity_id")
+        ],
+        "top_enb": [
+            {
+                "entity_id": e["entity_id"],
+                "failures": e["failures"],
+                "success": e["success"],
+                "failure_contribution_pct": e["failure_contribution_pct"],
+                "top_failure_patterns": e.get("top_failure_patterns", []),
+            }
+            for e in entity.get("top_enb", [])
+            if e.get("entity_id")
+        ],
+        "subscriber": {
+            "affected_imsi_count": subscriber.get("affected_imsi_count", 0),
+            "repeated_failure_ratio": subscriber.get("repeated_failure_ratio", 0),
+            "top_imsi_failure_share": subscriber.get("top_imsi_failure_share", 0),
+        },
+        "high_failure_rate_procedures": hints.get(
+            "high_failure_rate_procedures", {}
+        ) if hints else {},
     }
-    return build_loop_step_messages("step3", payload)
+
+    device_payload_text = json.dumps(device_data, ensure_ascii=False, separators=(",", ":"))
+
+    return build_loop_step_messages(
+        "step4",
+        step1_result=step1_result,
+        step2_result=step2_result,
+        step3_result=step3_result,
+        device_payload=device_payload_text,
+    )
 
 
-def build_loop_reasoning_steps(compact_rca_ir: dict[str, Any], previous_results: list[str]) -> list[dict[str, str]]:
+def build_loop_reasoning_steps(
+    compact_rca_ir: dict[str, Any],
+    previous_results: list[str],
+) -> list[dict[str, str]]:
     step_index = len(previous_results)
     if step_index == 0:
         return build_loop_step1_messages(compact_rca_ir)
     if step_index == 1:
-        return build_loop_step2_messages(compact_rca_ir)
+        return build_loop_step2_messages(compact_rca_ir, previous_results[0])
     if step_index == 2:
-        return build_loop_step3_messages(compact_rca_ir, previous_results[0], previous_results[1])
-    return build_loop_step3_messages(
+        return build_loop_step3_messages(
+            compact_rca_ir,
+            previous_results[0],
+            previous_results[1],
+        )
+    if step_index == 3:
+        return build_loop_step4_messages(
+            compact_rca_ir,
+            previous_results[0],
+            previous_results[1],
+            previous_results[2],
+        )
+    # 4 STEP 완료 후 추가 호출 시 STEP4 재사용
+    return build_loop_step4_messages(
         compact_rca_ir,
-        previous_results[0] if previous_results else "",
+        previous_results[0] if len(previous_results) > 0 else "",
         previous_results[1] if len(previous_results) > 1 else "",
+        previous_results[2] if len(previous_results) > 2 else "",
     )
 
 

@@ -13,7 +13,6 @@ interface Props {
 
 export default function ChatInput({ onSend, onCancel, onFileUpload, onFileRemove, attachments, disabled, streaming }: Props) {
   const [input, setInput] = useState('');
-  const [agentMode, setAgentMode] = useState(false);
   const [uploading, setUploading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -27,7 +26,7 @@ export default function ChatInput({ onSend, onCancel, onFileUpload, onFileRemove
 
   const handleSubmit = () => {
     if (!input.trim() || disabled) return;
-    onSend(input.trim(), agentMode);
+    onSend(input.trim(), false);
     setInput('');
   };
 
@@ -114,15 +113,6 @@ export default function ChatInput({ onSend, onCancel, onFileUpload, onFileRemove
           </button>
         )}
       </div>
-      <label className="agent-mode-toggle">
-        <input
-          type="checkbox"
-          checked={agentMode}
-          onChange={(e) => setAgentMode(e.target.checked)}
-          disabled={disabled}
-        />
-        Agent Loop Mode
-      </label>
     </div>
   );
 }

@@ -50,6 +50,9 @@ _NEEDED: dict[str, int] = {
 _STRING_FIELDS = {"imsi", "imsi_mcc_mnc_info", "first_enb_id", "apn"}
 _FLOAT_FIELDS = {"call_start_time"}
 _TOTAL_COLUMNS = max(154, max(FIELD_INDEX.values()) + 1)
+_INVALID_ENB_IDS: set[str] = {
+    "bo3reaGROYftluYm2HmjZQ==",  # 복호화 값 = 0, 유효하지 않은 eNB ID
+}
 
 @dataclass
 class XdrRecord:
@@ -127,6 +130,9 @@ def parse_file(
             select_exprs.append(expr.cast(pl.Int64, strict=False).fill_null(0).alias(name))
 
     projected_lf = filtered_lf.select(select_exprs)
+    projected_lf = projected_lf.filter(
+        ~pl.col("first_enb_id").is_in(list(_INVALID_ENB_IDS))
+    )
     if call_type_filter:
         projected_lf = projected_lf.filter(pl.col("call_type").is_in(call_type_filter))
     if max_records:

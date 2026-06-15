@@ -27,6 +27,7 @@ from app.database import get_db
 from app.models import Conversation, Message
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
+from app.rca.claude_verifier import ClaudeVerifierError, verify_and_correct_step
 from app.rca.parser import parse_file
 from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
@@ -331,6 +332,8 @@ async def stream_rca_report(
 @router.get("/conversations/{conv_id}/reasoning")
 async def stream_rca_reasoning(
     conv_id: int,
+    hallucination_step2: bool = False,
+    hallucination_step3: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
@@ -356,6 +359,40 @@ async def stream_rca_reasoning(
     async def generate():
         response_parts: list[str] = []
         step_results: list[str] = []
+
+        async def run_claude_verifier(step_response: str, step_label: str):
+            claude_header = f"\n\n---\n**[Claude Verifier - {step_label} 보정 중...]**\n\n"
+            response_parts.append(claude_header)
+            yield ("sse", f"data: {json.dumps({'token': claude_header})}\n\n")
+
+            if not settings.anthropic_api_key:
+                warning_text = "\n\n*(Claude verifier: ANTHROPIC_API_KEY 미설정, 원본 결과 사용)*\n\n"
+                response_parts.append(warning_text)
+                yield ("sse", f"data: {json.dumps({'warning': 'Claude verifier API 키 미설정, 원본 결과 사용'})}\n\n")
+                yield ("result", step_response)
+                return
+
+            corrected_parts: list[str] = []
+            try:
+                async for token in verify_and_correct_step(
+                    compact_rca_ir=compact_rca_ir,
+                    step_result=step_response,
+                    step_label=step_label,
+                    api_key=settings.anthropic_api_key,
+                ):
+                    corrected_parts.append(token)
+                    response_parts.append(token)
+                    yield ("sse", f"data: {json.dumps({'token': token})}\n\n")
+            except ClaudeVerifierError:
+                warning_text = "\n\n*(Claude verifier 호출 실패, 원본 결과 사용)*\n\n"
+                response_parts.append(warning_text)
+                yield ("sse", f"data: {json.dumps({'warning': 'Claude verifier 호출 실패, 원본 결과 사용'})}\n\n")
+                yield ("result", step_response)
+                return
+
+            corrected_result = "".join(corrected_parts)
+            yield ("result", corrected_result if corrected_result.strip() else step_response)
+
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 loop_step_labels = ["STEP 1", "STEP 2", "STEP 3", "STEP 4"]
@@ -406,6 +443,17 @@ async def stream_rca_reasoning(
                                 break
                     step_response = "".join(step_response_parts)
                     step_results.append(step_response)
+                    should_verify_step2 = loop_mode and step_index == 1 and hallucination_step2
+                    should_verify_step3 = loop_mode and step_index == 2 and hallucination_step3
+                    if should_verify_step2 or should_verify_step3:
+                        corrected_result = None
+                        async for event_type, verifier_event in run_claude_verifier(step_response, logical_step):
+                            if event_type == "sse":
+                                yield verifier_event
+                            elif event_type == "result":
+                                corrected_result = verifier_event
+                        if corrected_result is not None:
+                            step_results[-1] = corrected_result
                     if loop_mode and step_index < total_steps - 1:
                         # STEP 완료 이벤트 — 프론트에서 현재 streamingContent를 messages에 flush
                         yield f"data: {json.dumps({'step_done': True, 'step_index': step_index})}\n\n"

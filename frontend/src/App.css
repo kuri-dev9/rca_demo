@@ -466,6 +466,27 @@ body {
   accent-color: var(--accent);
 }
 
+.hallucination-toggle-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.hallucination-toggle-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+
+.hallucination-toggle-group input {
+  accent-color: var(--accent);
+}
+
 /* Code Block */
 .code-block {
   position: relative;

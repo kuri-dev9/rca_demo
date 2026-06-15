@@ -41,6 +41,8 @@ function App() {
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [rcaLoading, setRcaLoading] = useState(false);
   const [rcaLoopMode, setRcaLoopMode] = useState(false);
+  const [hallucinationStep2, setHallucinationStep2] = useState(false);
+  const [hallucinationStep3, setHallucinationStep3] = useState(false);
   const [streamingDebugPrompts, setStreamingDebugPrompts] = useState<PromptDebug[]>([]);
   const rcaFileInputRef = useRef<HTMLInputElement>(null);
   const [currentSystemPrompt, setCurrentSystemPrompt] = useState('');
@@ -57,6 +59,13 @@ function App() {
   useEffect(() => {
     streamingDebugPromptsRef.current = streamingDebugPrompts;
   }, [streamingDebugPrompts]);
+
+  useEffect(() => {
+    if (!rcaLoopMode) {
+      setHallucinationStep2(false);
+      setHallucinationStep3(false);
+    }
+  }, [rcaLoopMode]);
 
   const resetStreamingDebugPrompts = () => {
     streamingDebugPromptsRef.current = [];
@@ -263,6 +272,8 @@ function App() {
 
     const controller = streamRcaReasoning(
       convId,
+      hallucinationStep2,
+      hallucinationStep3,
       (token) => {
         if (activeConvIdRef.current !== convId) return;
         setStreamingContent((prev) => prev + token);
@@ -591,6 +602,29 @@ function App() {
               />
               RCA Loop Mode
             </label>
+            {rcaLoopMode && (
+              <div className="hallucination-toggle-group">
+                <span>Hallucination 감소:</span>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={hallucinationStep2}
+                    onChange={(e) => setHallucinationStep2(e.target.checked)}
+                    disabled={rcaLoading || streaming}
+                  />
+                  2단계
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={hallucinationStep3}
+                    onChange={(e) => setHallucinationStep3(e.target.checked)}
+                    disabled={rcaLoading || streaming}
+                  />
+                  3단계
+                </label>
+              </div>
+            )}
             <button
               className="knowledge-btn"
               onClick={handleSampleRca}

@@ -270,6 +270,8 @@ export function streamRcaReport(
 
 export function streamRcaReasoning(
   convId: number,
+  hallucinationStep2: boolean,
+  hallucinationStep3: boolean,
   onToken: (token: string) => void,
   onDone: () => void,
   onError: (err: string) => void,
@@ -277,8 +279,13 @@ export function streamRcaReasoning(
   onStepDone?: () => void,
 ): AbortController {
   const controller = new AbortController();
+  const params = new URLSearchParams();
+  if (hallucinationStep2) params.append('hallucination_step2', 'true');
+  if (hallucinationStep3) params.append('hallucination_step3', 'true');
+  const query = params.toString();
+  const url = `${API_BASE}/rca/conversations/${convId}/reasoning${query ? `?${query}` : ''}`;
 
-  fetch(`${API_BASE}/rca/conversations/${convId}/reasoning`, {
+  fetch(url, {
     signal: controller.signal,
   }).then(async (response) => {
     if (!response.ok) {
@@ -308,6 +315,7 @@ export function streamRcaReasoning(
           try {
             const data = JSON.parse(line.slice(6));
             if (data.token) onToken(data.token);
+            if (data.warning) onToken(`\n\n*${data.warning}*\n\n`);
             if (data.done) onDone();
             if (data.error) onError(data.error);
             if (data.prompt_debug) onPromptDebug?.(data.prompt_debug);

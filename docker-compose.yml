@@ -25,6 +25,7 @@ services:
     environment:
       DATABASE_URL: mysql+aiomysql://root:${MYSQL_ROOT_PASSWORD:-Mobigen_1234}@mysql:3306/chat_demo
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     volumes:
       - knowledge_data:/app/knowledge_data
       - ./docs/data:/app/docs/data:ro

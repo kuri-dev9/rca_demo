@@ -487,6 +487,16 @@ body {
   accent-color: var(--accent);
 }
 
+.hallucination-provider-select {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
 /* Code Block */
 .code-block {
   position: relative;

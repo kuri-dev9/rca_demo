@@ -27,7 +27,13 @@ from app.database import get_db
 from app.models import Conversation, Message
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
-from app.rca.claude_verifier import ClaudeVerifierError, verify_and_correct_step
+from app.rca.claude_verifier import (
+    CLAUDE_SYSTEM_PROMPT,
+    CLAUDE_VERIFIER_MODEL,
+    ClaudeVerifierError,
+    _build_user_prompt,
+    verify_and_correct_step,
+)
 from app.rca.parser import parse_file
 from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
@@ -334,6 +340,7 @@ async def stream_rca_reasoning(
     conv_id: int,
     hallucination_step2: bool = False,
     hallucination_step3: bool = False,
+    hallucination_provider: str = "claude",
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
@@ -360,33 +367,65 @@ async def stream_rca_reasoning(
         response_parts: list[str] = []
         step_results: list[str] = []
 
-        async def run_claude_verifier(step_response: str, step_label: str):
-            claude_header = f"\n\n---\n**[Claude Verifier - {step_label} 보정 중...]**\n\n"
-            response_parts.append(claude_header)
-            yield ("sse", f"data: {json.dumps({'token': claude_header})}\n\n")
+        async def run_verifier(step_response: str, step_label: str, step_index: int):
+            if hallucination_provider == "gemini":
+                from app.rca.gemini_verifier import (
+                    GEMINI_VERIFIER_MODEL,
+                    GeminiVerifierError,
+                    verify_and_correct_step_gemini,
+                )
+                api_key = settings.google_api_key
+                provider_label = "Gemini Verifier"
+                verifier_fn = verify_and_correct_step_gemini
+                error_class = GeminiVerifierError
+                no_key_msg = "GOOGLE_API_KEY 미설정, 원본 결과 사용"
+                model_label = GEMINI_VERIFIER_MODEL
+            else:
+                api_key = settings.anthropic_api_key
+                provider_label = "Claude Verifier"
+                verifier_fn = verify_and_correct_step
+                error_class = ClaudeVerifierError
+                no_key_msg = "ANTHROPIC_API_KEY 미설정, 원본 결과 사용"
+                model_label = CLAUDE_VERIFIER_MODEL
 
-            if not settings.anthropic_api_key:
-                warning_text = "\n\n*(Claude verifier: ANTHROPIC_API_KEY 미설정, 원본 결과 사용)*\n\n"
+            verifier_header = f"\n\n---\n**[{provider_label} - {step_label} 보정 중...]**\n\n"
+            response_parts.append(verifier_header)
+            yield ("sse", f"data: {json.dumps({'token': verifier_header})}\n\n")
+
+            if not api_key:
+                warning_text = f"\n\n*({provider_label}: {no_key_msg})*\n\n"
                 response_parts.append(warning_text)
-                yield ("sse", f"data: {json.dumps({'warning': 'Claude verifier API 키 미설정, 원본 결과 사용'})}\n\n")
+                yield ("sse", f"data: {json.dumps({'warning': no_key_msg})}\n\n")
                 yield ("result", step_response)
                 return
 
+            verifier_call_index = step_index + 10
+            verifier_label = f"{provider_label} {step_label}"
+            verifier_prompt_text = _build_user_prompt(compact_rca_ir, step_response, step_label)
+            verifier_payload = {
+                "model": f"{provider_label} ({model_label})",
+                "messages": [
+                    {"role": "system", "content": CLAUDE_SYSTEM_PROMPT},
+                    {"role": "user", "content": verifier_prompt_text},
+                ],
+            }
+            yield ("sse", prompt_debug_event(verifier_call_index, verifier_label, verifier_payload))
+
             corrected_parts: list[str] = []
             try:
-                async for token in verify_and_correct_step(
+                async for token in verifier_fn(
                     compact_rca_ir=compact_rca_ir,
                     step_result=step_response,
                     step_label=step_label,
-                    api_key=settings.anthropic_api_key,
+                    api_key=api_key,
                 ):
                     corrected_parts.append(token)
                     response_parts.append(token)
                     yield ("sse", f"data: {json.dumps({'token': token})}\n\n")
-            except ClaudeVerifierError:
-                warning_text = "\n\n*(Claude verifier 호출 실패, 원본 결과 사용)*\n\n"
+            except error_class:
+                warning_text = f"\n\n*({provider_label} 호출 실패, 원본 결과 사용)*\n\n"
                 response_parts.append(warning_text)
-                yield ("sse", f"data: {json.dumps({'warning': 'Claude verifier 호출 실패, 원본 결과 사용'})}\n\n")
+                yield ("sse", f"data: {json.dumps({'warning': f'{provider_label} 호출 실패, 원본 결과 사용'})}\n\n")
                 yield ("result", step_response)
                 return
 
@@ -447,7 +486,7 @@ async def stream_rca_reasoning(
                     should_verify_step3 = loop_mode and step_index == 2 and hallucination_step3
                     if should_verify_step2 or should_verify_step3:
                         corrected_result = None
-                        async for event_type, verifier_event in run_claude_verifier(step_response, logical_step):
+                        async for event_type, verifier_event in run_verifier(step_response, logical_step, step_index):
                             if event_type == "sse":
                                 yield verifier_event
                             elif event_type == "result":

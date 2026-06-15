@@ -18,3 +18,4 @@ numpy==2.1.3
 kiwipiepy
 polars>=0.20
 cryptography
+google-genai>=1.0.0

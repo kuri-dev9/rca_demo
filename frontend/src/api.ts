@@ -272,6 +272,7 @@ export function streamRcaReasoning(
   convId: number,
   hallucinationStep2: boolean,
   hallucinationStep3: boolean,
+  hallucinationProvider: 'claude' | 'gemini',
   onToken: (token: string) => void,
   onDone: () => void,
   onError: (err: string) => void,
@@ -282,6 +283,7 @@ export function streamRcaReasoning(
   const params = new URLSearchParams();
   if (hallucinationStep2) params.append('hallucination_step2', 'true');
   if (hallucinationStep3) params.append('hallucination_step3', 'true');
+  if (hallucinationStep2 || hallucinationStep3) params.append('hallucination_provider', hallucinationProvider);
   const query = params.toString();
   const url = `${API_BASE}/rca/conversations/${convId}/reasoning${query ? `?${query}` : ''}`;
 

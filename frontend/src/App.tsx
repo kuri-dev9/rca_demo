@@ -43,6 +43,7 @@ function App() {
   const [rcaLoopMode, setRcaLoopMode] = useState(false);
   const [hallucinationStep2, setHallucinationStep2] = useState(false);
   const [hallucinationStep3, setHallucinationStep3] = useState(false);
+  const [hallucinationProvider, setHallucinationProvider] = useState<'claude' | 'gemini'>('claude');
   const [streamingDebugPrompts, setStreamingDebugPrompts] = useState<PromptDebug[]>([]);
   const rcaFileInputRef = useRef<HTMLInputElement>(null);
   const [currentSystemPrompt, setCurrentSystemPrompt] = useState('');
@@ -64,6 +65,7 @@ function App() {
     if (!rcaLoopMode) {
       setHallucinationStep2(false);
       setHallucinationStep3(false);
+      setHallucinationProvider('claude');
     }
   }, [rcaLoopMode]);
 
@@ -274,6 +276,7 @@ function App() {
       convId,
       hallucinationStep2,
       hallucinationStep3,
+      hallucinationProvider,
       (token) => {
         if (activeConvIdRef.current !== convId) return;
         setStreamingContent((prev) => prev + token);
@@ -623,6 +626,17 @@ function App() {
                   />
                   3단계
                 </label>
+                {(hallucinationStep2 || hallucinationStep3) && (
+                  <select
+                    value={hallucinationProvider}
+                    onChange={(e) => setHallucinationProvider(e.target.value as 'claude' | 'gemini')}
+                    disabled={rcaLoading || streaming}
+                    className="hallucination-provider-select"
+                  >
+                    <option value="claude">Claude</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                )}
               </div>
             )}
             <button

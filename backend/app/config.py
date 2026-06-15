@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     database_url: str = "mysql+aiomysql://root:Mobigen_1234@localhost:3306/chat_demo"
     ollama_base_url: str = "http://localhost:11434"
     anthropic_api_key: str = ""
+    google_api_key: str = ""
 
     class Config:
         env_file = ".env"

@@ -422,8 +422,9 @@ async def stream_rca_reasoning(
                     corrected_parts.append(token)
                     response_parts.append(token)
                     yield ("sse", f"data: {json.dumps({'token': token})}\n\n")
-            except error_class:
-                warning_text = f"\n\n*({provider_label} 호출 실패, 원본 결과 사용)*\n\n"
+            except Exception as exc:
+                logger.error("%s 호출 중 예외 발생: %s", provider_label, exc, exc_info=True)
+                warning_text = f"\n\n*({provider_label} 호출 실패: {type(exc).__name__}: {exc})*\n\n"
                 response_parts.append(warning_text)
                 yield ("sse", f"data: {json.dumps({'warning': f'{provider_label} 호출 실패, 원본 결과 사용'})}\n\n")
                 yield ("result", step_response)

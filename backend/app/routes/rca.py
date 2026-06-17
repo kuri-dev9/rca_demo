@@ -462,7 +462,7 @@ async def stream_rca_reasoning(
                         yield f"data: {json.dumps({'token': marker})}\n\n"
 
                     step_response_parts: list[str] = []
-                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True}
+                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
                     yield prompt_debug_event(step_index + 1, label, llm_payload)
                     async with client.stream(
                         "POST",

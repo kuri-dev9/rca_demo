@@ -466,7 +466,7 @@ def _ir_to_markdown(ir: dict[str, Any]) -> str:
                 f"| {row.get('failure_contribution_pct', 0)}% | {pattern_text} |"
             )
 
-    # Subscriber Summary
+    # Affected Subscriber Scope — 단말/가입자 원인 분석이 아니라 영향 범위 산정용
     subscriber = _get_data(ir, "subscriber_summary", {})
     if subscriber:
         affected = subscriber.get("affected_imsi_count", 0)
@@ -474,7 +474,7 @@ def _ir_to_markdown(ir: dict[str, Any]) -> str:
         ratio = subscriber.get("repeated_failure_ratio", 0)
         lines += [
             " ",
-            "### Subscriber Summary",
+            "### Affected Subscriber Scope (가입자 영향 범위 — 원인 판단용 아님)",
             f"- Affected IMSI: {affected:,}",
             f"- Single Failure IMSI: {subscriber.get('single_failure_imsi_count', 0):,}",
             f"- Repeated Failure IMSI: {repeated:,} ({ratio}%)",
@@ -715,41 +715,23 @@ def build_reasoning_messages(observability: dict[str, Any]) -> list[dict[str, st
 
 
 STEP_SYSTEM_PROMPT = """\
-당신은 LTE/EPC 네트워크 장애 분석 전문가다.
-반드시 한국어로 작성한다.
-
-공통 규칙:
-- 각 STEP에서 지시한 역할만 수행한다.
-- 다음 STEP의 역할을 미리 수행하지 않는다.
-- 입력에 없는 값을 생성하지 않는다.
-- Interface / Message / Cause 이름을 번역하거나 변경하지 않는다.
+당신은 LTE/EPC 네트워크 장비 장애 분석가다.
+한국어로 간결하게 작성한다.
+원인은 항상 네트워크 장비/인터페이스 관점으로 표현한다 (단말/UE/USIM 원인 금지).
 """
 
 
 STEP1_TEMPLATE = """\
 STEP 1: 통계 기반 원인 파악
 
-역할:
-아래 [입력 통계]의 error_stats 배열에 있는 항목 각각에 대해
-3GPP 절차 지식을 결합하여 원인을 파악한다.
-3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
-
-작성 형식 (error_stats 항목 하나당 정확히 아래 4줄, 다른 줄 추가 금지):
+[입력 통계]의 error_stats 항목마다 정확히 아래 4줄만 작성한다:
 에러: <interface> / <message> / <cause>
 구간: <3GPP 노드 간 구간>
-의미: <message/cause의 3GPP상 의미, 1문장>
-원인: <count와 영향 IMSI/MME/eNB 수를 인용한 원인 파악, 1문장. 확정 불가 시 "가능성" 또는 "추가 확인 필요" 포함>
+의미: <3GPP상 의미, 1문장>
+원인: <count/영향 IMSI 등 수치를 인용한 원인, 1문장. 불확실하면 "가능성"으로 표현>
 
-각 항목 작성 후 빈 줄 하나로 구분한다.
-error_stats 항목 수만큼만 작성하고, 마지막 항목을 쓴 뒤 바로 종료한다.
-
-금지:
-- 위 4줄 형식 외의 설명, 표, 목록, 머리말, 맺음말 작성 금지
-- 같은 문장이나 형식을 두 번 이상 반복해서 출력 금지
-- 실제 장비명(entity_id) 언급 금지
-- [입력 통계]에 없는 수치 생성 금지
-- 조치 방향 작성 금지
-- 에러 패턴 간 상관관계 분석(STEP2 역할) 또는 원인 확정(STEP3 역할) 수행 금지
+항목 사이는 빈 줄로 구분하고, error_stats 항목 수만큼만 작성한 뒤 종료한다.
+같은 문장을 반복하지 않는다. entity_id, 조치 방향, 상관관계 분석은 작성하지 않는다.
 
 [입력 통계]
 {payload}
@@ -758,35 +740,13 @@ error_stats 항목 수만큼만 작성하고, 마지막 항목을 쓴 뒤 바로
 STEP2_TEMPLATE = """\
 STEP 2: 상관관계 분석
 
-역할:
-[STEP1 결과]만 사용하여 에러 패턴 간 상관관계를 분석한다.
-[STEP1 결과]에 없는 데이터나 통신 일반 지식을 추가로 사용하지 않는다.
+[STEP1 결과]만 사용해 에러 패턴을 아래 3그룹으로 분류한다:
+1. 연관 그룹 — 동일 절차 내 연쇄로 보이는 패턴 ("유발/연쇄" 표현은 [STEP1 결과]에 근거가 있을 때만)
+2. 독립 그룹 — 단독으로 발생하는 패턴
+3. 도메인 후보 그룹 — Subscriber/HSS, Core/EPC, RAN/Access, Transport/Interface, Unknown 중 택1
 
-[STRICT_CHAIN_RULE]
-직접적인 인과관계 표현("A 때문에 B 발생", "A가 B를 유발", "A → B")은
-[STEP1 결과]에서 동일 call_type/절차로 명시된 에러 패턴 사이에서만 사용한다.
-[STEP1 결과]에 명시되지 않은 연결을 임의로 만들지 않는다.
-
-[DOMAIN_GROUP_RULE]
-서로 다른 절차의 에러라도 동일 도메인으로 묶는 것은 허용하나,
-"A가 B를 유발했다" 식 표현은 금지하며 "공통 도메인 후보"로만 표현한다.
-
-수행:
-- [STEP1 결과]에 등장한 에러 패턴들을 아래로 분류한다:
-  1. 연관 그룹: 동일 절차 내에서 연쇄적으로 보이는 에러 패턴 묶음
-  2. 독립 그룹: 다른 에러와 무관하게 단독으로 발생하는 패턴
-  3. 도메인 후보 그룹: Subscriber/HSS, Core/EPC, RAN/Access, UE/NAS State, Unknown
-     중 하나로 묶을 수 있는 패턴 (원인 확정 아님)
-- 각 그룹에 대해 [STEP1 결과]에 언급된 근거(수치, 3GPP 의미)를 인용한다.
-
-금지:
-- 실제 장비명(entity_id) 언급 금지
-- [STEP1 결과]에 없는 수치/노드/절차 생성 금지
-- 조치 방향 작성 금지
-- STEP1 내용을 그대로 반복 출력 금지
-- "연쇄", "유발", "이어짐" 표현은 1번 연관 그룹에만 사용, 2번 독립 그룹에는 금지
-- "Based on", "Procedural Links", "Root Cause Origin" 등 정의되지 않은 임의 표현 금지
-- 다음과 같은 임의 통합/축약 명칭 금지: No_Service, RADIO_CONTEXT_REJECT, Not_Subscribed / Barred
+각 그룹은 [STEP1 결과]에 있는 근거(수치, 3GPP 의미)만 인용한다.
+[STEP1 결과]에 없는 연결/수치/노드를 만들지 않는다. entity_id, 조치 방향은 작성하지 않는다.
 
 [STEP1 결과]
 {step1_result}
@@ -795,30 +755,13 @@ STEP 2: 상관관계 분석
 STEP3_TEMPLATE = """\
 STEP 3: 원인 확정
 
-역할:
-[STEP1 결과]의 3GPP 기반 원인 파악과 [STEP2 결과]의 상관관계 분석만 사용하여
-원인을 확정한다. 새로운 데이터나 통신 일반 지식을 추가로 사용하지 않는다.
+[STEP1 결과]와 [STEP2 결과]만 사용해 원인을 "주 원인 후보" 또는 "보조 원인 후보"로 정리한다.
+영역(Core/EPC, Subscriber/HSS, RAN/Access, Transport/Interface, MME Node Concentration)별로
+영향도(High/Medium/Low)를 평가하되, 근거 수치는 [STEP1 결과]/[STEP2 결과]에 있는 것만 인용한다.
+Subscriber/HSS는 가입자 DB/HSS 관점이며 영향 범위 판단에만 쓴다 (단말 원인 확정 금지).
 
-수행:
-- [STEP2 결과]의 연관/독립/도메인 그룹별로 [STEP1 결과]의 원인 파악 내용을 종합하여
-  원인을 아래 중 하나로 분류한다:
-  - 주 원인 후보
-  - 보조 원인 후보
-  - 단정 불가
-- 영역(Core/EPC, Subscriber/HSS, RAN/Access, UE/NAS State)별로 영향도(High/Medium/Low)를
-  평가하되, [STEP1 결과]/[STEP2 결과]에 언급된 수치만 근거로 사용한다.
-
-금지:
-- 실제 장비명(entity_id) 언급 금지
-- [STEP1 결과], [STEP2 결과]에 없는 수치/노드/원인 생성 금지
-- 통신 지식만으로 원인이나 영향도를 추정하는 것 금지 — 반드시 STEP1/STEP2 근거를 인용
-- 조치 방향 작성 금지
-- STEP1, STEP2 내용을 그대로 반복 출력 금지
-- 확정할 수 없는 내용을 확정적으로 기술 금지 → "가능성" 또는 "추가 확인 필요"로 표현
-- 입력 데이터에 직접 존재하지 않으면 다음 표현 금지:
-  GTP-U 경로 오류, Create Session Response 실패, S5/S8, Cell_Reselection_Failure,
-  무선 구간 문제는 배제, 코어 네트워크 전반의 프로토콜 처리 오류, 대량 세션 요청,
-  Congestion, CPU/Memory 부하
+새 데이터·수치·노드를 만들지 않는다. 확정할 수 없으면 "가능성"/"추가 확인 필요"로 표현한다.
+entity_id, 조치 방향은 작성하지 않는다.
 
 [STEP1 결과]
 {step1_result}
@@ -830,46 +773,16 @@ STEP 3: 원인 확정
 STEP4_TEMPLATE = """\
 STEP 4: 최종 RCA 보고서
 
-역할:
-STEP4는 새로운 분석 단계가 아니다.
-[STEP3 결과]를 [실제 장비 데이터]에 매핑하여 운영자용 최종 보고서로 재구성한다.
-STEP1/STEP2의 중간 분석 내용에는 접근하지 않는다.
+[STEP3 결과]를 [실제 장비 데이터]에 매핑해 아래 순서로만 작성한다 (새 분석 금지):
+1. 요약 — 전체 실패율, 주요 실패 절차, 주요 도메인 후보
+2. 근거 — [실제 장비 데이터]/[STEP3 결과]에 있는 내용만 bullet(•)
+3. RCA 판단 — [STEP3 결과]의 주 원인 후보 / 보조 원인 후보를 그대로 인용
+4. 조치 권고 — [허용 장비 및 인터페이스 목록]에 있는 항목만,
+   "<interface> / <message> / <cause> 대상의 <점검 내용>" 형식
+   (예: S6a_Diameter / AIR_AIA / Unassigned 대상 IMSI의 HSS 가입자 프로파일 확인)
 
-[FINAL_REPORT_RULE]
-허용: STEP3 결과 요약 / 통계 요약 / 조치 방향 정리
-금지: 새로운 장애 원인 생성 / 새로운 인과관계 생성 / 새로운 장애 노드 생성 / 새로운 절차 생성
-
-[NO_NEW_KNOWLEDGE_RULE]
-[STEP3 결과] 또는 [실제 장비 데이터]에 없는 통신 지식(3GPP 절차 지식 등)을 추가하지 않는다.
-일반적인 통신 지식으로 보강하지 않는다. "가능성" 표현도 입력 근거가 있는 경우에만 사용한다.
-
-출력 형식:
-- 영향도 요약: [STEP3 결과]의 영역별 영향도와 근거
-- 장애 위치: 실제 장비명과 인터페이스 기반으로 특정
-- RCA 판단: [STEP3 결과]의 주 원인 후보 / 보조 원인 후보 / 단정 불가 항목을 그대로 인용
-- 조치 방향: 아래 허용 목록의 장비/인터페이스 기준으로만 작성
-
-조치 권고 형식: <interface> / <message> / <cause> 대상의 <점검 내용>
-
-허용 예:
-- S6a_Diameter / AIR_AIA / Unassigned 대상 IMSI의 HSS 가입자 프로파일 확인
-- S11_GTPv2C / CREATE_SESSION_REQUEST / TIMEOUT 구간의 MME-SGW 응답 로그 확인
-- S1MME_NAS_ESM / PDN_CONNECTIVITY_REJECT 대상의 가입자 서비스 옵션 확인
-- S1MME_NAS_EMM / ATTACH_REJECT / No_Suitable_Cells 대상의 TAC/PLMN/셀 선택 관련 로그 확인
-
-금지:
-- [STEP3 결과] 내용을 그대로 반복 출력 금지
-- 실제 장비 데이터에 없는 entity_id 생성 금지
-- 실제 데이터에 없는 수치 생성 금지
-- [STEP3 결과]에 없는 새로운 장애 원인·인과관계·장애 노드·절차 생성 금지
-- [STEP3 결과] 또는 입력 데이터에 없는 통신 지식 추가 금지
-- 확정할 수 없는 내용을 확정적으로 기술 금지
-  → 반드시 "가능성" 또는 "추가 확인 필요"로 표현
-- 허용 목록에 없는 장비명, 인터페이스명, 기술 용어 작성 금지
-- 다음 조치 표현 금지: HSS 부하분산 점검, HSS 이중화 점검, PCRF 점검, GUTI 매칭 실패,
-  AV 제공 지연, GTP-U 경로 점검, S5/S8 점검, KPI 대시보드 구축, CPU/Memory 부하 점검, Congestion 점검
-- 다음 표현 금지: 특정 핵심 노드(MME)를 중심으로, 인증 서버 가용성 증대, 중앙 데이터베이스,
-  인터페이스 신뢰도 문제, 서비스 품질 저하, 연결 실패 사례, 근본 원인으로 판단됩니다
+[STEP3 결과]나 입력 데이터에 없는 원인·수치·장비·조치를 만들지 않는다.
+단말 측 RCA/조치는 작성하지 않는다. 확정할 수 없으면 "가능성"/"추가 확인 필요"로 표현한다.
 
 [허용 장비 및 인터페이스 목록]
 {allowed_list}
@@ -1171,6 +1084,12 @@ def build_gemma4_system_prompt() -> str:
 - 데이터에 없는 원인을 확정적으로 기술하지 않는다.
 - LTE/EPC 일반 지식은 사용 가능하나 데이터 근거 없이 원인을 단정하지 않는다.
 
+RCA 목적은 장비/네트워크 원인 분석이다. 단말/사용자/UE 자체 문제는 RCA 원인 후보에서 제외한다.
+입력 Cause가 UE 또는 NAS 상태처럼 보이더라도, 최종 RCA는 네트워크 장비, 인터페이스,
+HSS/SGW/MME/eNB 관점에서만 작성한다.
+금지 표현: UE 문제, 단말 문제, USIM 문제, 단말 상태 이상, 사용자 단말 조치, 단말 재부팅,
+USIM 교체, UE/NAS State, subscriber-side
+
 영향도 평가 기준:
 - High: 해당 Domain 장애가 전체 실패의 30% 이상이거나 특정 장비에 집중
 - Medium: 전체 실패의 10~30% 또는 복수 장비에 분산
@@ -1341,7 +1260,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
 
     if subscriber:
         lines += [
-            "## 가입자 요약",
+            "## 가입자 영향 범위 (원인 판단용 아님)",
             f"- 영향 IMSI: {subscriber.get('affected_imsi_count', 0):,}명",
             f"- 반복 실패 IMSI: {subscriber.get('repeated_failure_imsi_count', 0)}명 "
             f"({subscriber.get('repeated_failure_ratio', 0)}%)",
@@ -1391,7 +1310,7 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
 
         if subscriber_hint:
             lines += [
-                "### 가입자 분포",
+                "### 가입자 영향 분포 (원인 판단용 아님)",
                 f"- 반복 실패 IMSI: {subscriber_hint.get('repeated_failure_imsi_count', 0)}명 / "
                 f"{subscriber_hint.get('affected_imsi_count', 0)}명 "
                 f"({subscriber_hint.get('repeated_failure_ratio', 0)}%)",
@@ -1427,11 +1346,12 @@ def _format_gemma_user_message(observation: dict[str, Any]) -> str:
         "   - RAN 후보 / Core 후보 그룹의 타당성 검토 및 필요시 재분류",
         "",
         "2. 영향도 평가",
-        "   RAN/Access, Core Network, Subscriber/UE 각각에 대해",
+        "   RAN/Access, Core/EPC, Subscriber/HSS 각각에 대해",
         "   High / Medium / Low 중 하나로 평가하고 데이터 기반 근거를 작성하세요.",
         "   - 건수가 많다고 High가 아닙니다.",
         "   - 해당 Domain 장애가 서비스에 미치는 실질적 영향을 기준으로 판단하세요.",
-        "   - Subscriber/UE는 반드시 가입자 분포의 반복 실패 비율을 근거로 판단하세요.",
+        "   - Subscriber/HSS는 가입자 DB/HSS 관점이며, 가입자 분포의 반복 실패 비율은",
+        "     영향 범위 판단에만 사용하세요. 단말/USIM 측 원인으로 확정하지 마세요.",
         "   - 사전 분석 데이터의 패턴 건수와 집중 장애 eNB 수치를 활용하세요.",
         "",
         "3. 최종 RCA",

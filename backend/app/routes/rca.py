@@ -484,7 +484,7 @@ async def stream_rca_reasoning(
                                 break
                     step_response = "".join(step_response_parts)
 
-                    if loop_mode and step_index in (1, 2, 3):
+                    if loop_mode:
                         step_key = f"step{step_index + 1}"
                         violations = find_forbidden_terms(step_key, step_response)
                         if violations:

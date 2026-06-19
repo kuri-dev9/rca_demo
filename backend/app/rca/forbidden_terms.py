@@ -22,6 +22,26 @@ GLOBAL_FORBIDDEN_TERMS: list[str] = [
     "Create Session Response",
 ]
 
+# RCA 목적은 장비/네트워크 원인 분석이다 — 단말/가입자 측 원인 판단 및 조치는 모든 STEP에서 금지.
+UE_DEVICE_FORBIDDEN_TERMS: list[str] = [
+    "UE 문제",
+    "단말 문제",
+    "USIM 문제",
+    "단말 상태 이상",
+    "사용자 단말 조치",
+    "단말 재부팅",
+    "USIM 교체",
+    "UE/NAS State",
+    "Subscriber/UE",
+    "subscriber-side",
+    "단말 인증 동기화 문제로 확정",
+    "단말 재시도 필요",
+    "사용자 단말 점검",
+    "단말 교체",
+    "단말 세션 상태 문제",
+]
+GLOBAL_FORBIDDEN_TERMS.extend(UE_DEVICE_FORBIDDEN_TERMS)
+
 STEP2_FORBIDDEN_TERMS: list[str] = [
     "Based on",
     "Procedural Links",

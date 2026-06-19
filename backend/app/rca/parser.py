@@ -9,9 +9,19 @@ from dataclasses import dataclass
 from typing import Optional
 
 import gc
+import logging
+
 import polars as pl
 
-from app.rca.spec_loader import FIELD_INDEX
+from app.rca.spec_loader import CALL_TYPE_MAP, FIELD_INDEX
+
+logger = logging.getLogger(__name__)
+
+# RCA는 장비/네트워크 RCA가 목적이므로 Paging 계열 call_type은 분석 대상에서 제외한다.
+# 원본 파일은 변경하지 않고, 분석용 LazyFrame 구성 단계에서만 필터링한다.
+_PAGING_CALL_TYPE_CODES: set[int] = {
+    code for code, name in CALL_TYPE_MAP.items() if "paging" in name.lower()
+}
 
 # 파싱에 필요한 필드 목록 (이름 → FIELD_INDEX 기반 index)
 _NEEDED: dict[str, int] = {
@@ -133,6 +143,18 @@ def parse_file(
     projected_lf = projected_lf.filter(
         ~pl.col("first_enb_id").is_in(list(_INVALID_ENB_IDS))
     )
+
+    excluded_paging = 0
+    if _PAGING_CALL_TYPE_CODES:
+        pre_paging_count = projected_lf.select(pl.len()).collect().item()
+        projected_lf = projected_lf.filter(
+            ~pl.col("call_type").is_in(list(_PAGING_CALL_TYPE_CODES))
+        )
+        post_paging_count = projected_lf.select(pl.len()).collect().item()
+        excluded_paging = pre_paging_count - post_paging_count
+        if excluded_paging:
+            logger.info("[RCA][FILTER] excluded_paging_records=%d", excluded_paging)
+
     if call_type_filter:
         projected_lf = projected_lf.filter(pl.col("call_type").is_in(call_type_filter))
     if max_records:
@@ -144,6 +166,7 @@ def parse_file(
         "raw_rows": parsed,
         "parsed": parsed,
         "skipped": max(total_lines - parsed, 0),
+        "excluded_paging": excluded_paging,
     }
 
     del filtered_lf, lazy_df

@@ -757,13 +757,32 @@ STEP 2: 상관 분석
 STEP1의 에러 해석 결과를 기반으로
 에러 간 인과관계와 독립/연관 여부를 분석한다.
 
+[STRICT_CHAIN_RULE]
+직접적인 인과관계 표현("A 때문에 B 발생", "A가 B를 유발")은
+동일 절차(call_type) 안에서 동일 Failure Flow / Error Chain을 구성하는
+이벤트 사이에서만 사용할 수 있다.
+서로 다른 절차(call_type)에 속한 에러는 직접 인과관계로 연결하지 않는다.
+
+허용 예시 (동일 Flow 내부):
+AIR_AIA(Unassigned) → UE_CONTEXT_RELEASE_COMMAND(NAS_Authentication_Failure)
+
+금지 예시 (서로 다른 Flow를 인과관계로 연결):
+AIR_AIA(Unassigned) → Requested_service_option_not_subscribed
+CREATE_SESSION_REQUEST(TIMEOUT) → Network_failure
+위 두 관계는 동일 Flow에 존재하지 않으면 표현 금지.
+
+[DOMAIN_GROUP_RULE]
+서로 다른 Error Chain이라도 동일 도메인(HSS, Subscriber Profile, EPC Signaling, RAN 등)으로
+묶어서 설명하는 것은 허용한다.
+단, 이 경우에도 "A가 B를 유발했다" / "A 때문에 B가 발생했다" 식의 인과관계 표현은 금지한다.
+대신 "공통 원인 후보" 또는 "동일 도메인 계열 장애" 표현만 사용한다.
+
 수행:
 - 에러들을 그룹으로 분류한다:
-  - 동일 절차 내에서 연쇄적으로 발생하는 에러 그룹
+  - 동일 절차(call_type) 내에서 연쇄적으로 발생하는 에러 그룹 (Failure Flow / Error Chain)
   - 서로 독립적인 에러 그룹
-- 각 그룹에 대해:
-  - 공통 원인 가능성이 있는지
-  - 한 에러가 다른 에러를 유발했을 가능성이 있는지
+- 동일 그룹 내부에서만 인과관계 가능성을 기술한다.
+- 서로 다른 그룹 간에는 도메인 단위 공통 원인 후보 여부만 기술한다.
 
 금지:
 - 실제 장비명(entity_id) 언급 금지
@@ -771,6 +790,8 @@ STEP1의 에러 해석 결과를 기반으로
 - 장애 위치 확정 금지
 - 조치 방향 작성 금지
 - STEP1 내용을 그대로 반복 출력 금지
+- 동일 Failure Flow/Error Chain에 속하지 않는 에러 간 직접 인과관계 표현 금지
+- 입력 데이터에 없는 연쇄 장애(추가 노드, 추가 단계) 생성 금지
 
 [STEP1 결과]
 {step1_result}
@@ -783,18 +804,36 @@ STEP 3: 장애 위치 확정
 STEP1 에러 해석과 STEP2 상관 분석을 기반으로
 장애가 발생한 노드/인터페이스를 특정한다.
 
+[IMPACT_SCORING_RULE]
+영향도(High/Medium/Low)는 [입력 통계]에 있는 수치만 근거로 산정한다.
+3GPP 절차 지식이나 통신 경험 기반 추정으로 영향도를 매기지 않는다.
+
+사용 가능한 데이터 ([입력 통계]에서만 인용):
+- failure_rate
+- candidate_pattern_ratio (RAN/Core 후보 패턴 비율)
+- repeated_failure_ratio
+- affected_imsi
+- top_imsi_failure_share
+- mme_failure_distribution
+
+판단 기준 (예시):
+- candidate_pattern_ratio의 RAN 비율이 0%면 RAN 영향도를 High로 평가하지 않는다.
+- repeated_failure_ratio가 5% 미만이면 Subscriber 확산 영향도를 High로 평가하지 않는다.
+- mme_failure_distribution상 MME 간 기여율 차이가 20% 미만이면
+  특정 MME 집중 장애로 표현하지 않는다.
+- 근거 수치가 기준에 미달하면 해당 영역은 Low 또는 "추가 확인 필요"로 표현한다.
+
 수행:
 - 각 에러 그룹별로 장애 발생 노드/인터페이스를 특정한다
 - RAN/Access 영역과 Core Network 영역을 구분한다
 - Subscriber/UE 영역 관련 여부를 판단한다
-- 각 영역별 영향도를 High / Medium / Low 로 평가한다:
-  - 집중 장애(특정 구간 집중) → High 가능성
-  - 분산 장애(여러 구간) → Medium 가능성
-  - 단발성 또는 미미한 영향 → Low
+- 각 영역별 영향도를 [입력 통계] 수치에 근거하여 High / Medium / Low 로 평가하고
+  판단에 사용한 수치를 함께 명시한다
 
 금지:
 - 실제 장비명(entity_id) 언급 금지
-- 건수/비율 언급 금지
+- [입력 통계]에 없는 수치 생성 금지
+- 통신 지식만으로 영향도를 추정하는 것 금지
 - 조치 방향 작성 금지
 - STEP1, STEP2 내용을 그대로 반복 출력 금지
 - 확정할 수 없는 내용을 확정적으로 기술 금지
@@ -804,19 +843,39 @@ STEP1 에러 해석과 STEP2 상관 분석을 기반으로
 
 [STEP2 결과]
 {step2_result}
+
+[입력 통계]
+{stats_payload}
 """
 
 STEP4_TEMPLATE = """\
 STEP 4: 최종 레포트
 
 역할:
-STEP1~3의 분석 결과를 실제 장비 데이터에 매핑하여
-운영자용 최종 RCA 보고서를 작성한다.
+STEP4는 새로운 분석 단계가 아니다.
+STEP2와 STEP3 결과를 실제 장비 데이터에 매핑하여 재정리하는 단계다.
+
+[FINAL_REPORT_RULE]
+허용:
+- STEP2 결과 요약
+- STEP3 영향도 요약
+- 통계 요약
+- 조치 방향 정리
+
+금지:
+- 새로운 장애 원인 생성
+- 새로운 인과관계 생성
+- 새로운 장애 노드 생성
+- 새로운 절차 생성
+
+[NO_NEW_KNOWLEDGE_RULE]
+STEP1~3 결과 또는 [실제 장비 데이터]에 존재하지 않는 통신 지식을 추가하지 않는다.
+예 (STEP1~3 결과나 입력 데이터에 없으면 금지): "셀 커버리지 부족", "RF 품질 저하", "MME 내부 처리 오류"
 
 수행:
-1. STEP3의 영향도 평가를 실제 장비 데이터와 매핑
+1. STEP3의 영향도 평가를 실제 장비 데이터와 매핑하여 정리
 2. 실제 entity_id, 건수, 기여율을 인용하여 장애 위치 구체화
-3. 조치 방향 작성
+3. STEP2/STEP3 결과에 근거한 조치 방향 정리
 
 출력 형식:
 - 영향도 요약: RAN/Access, Core Network, Subscriber/UE 각각의 영향도와 근거
@@ -827,6 +886,8 @@ STEP1~3의 분석 결과를 실제 장비 데이터에 매핑하여
 - STEP1~3 내용을 그대로 반복 출력 금지
 - 실제 장비 데이터에 없는 entity_id 생성 금지
 - 실제 데이터에 없는 수치 생성 금지
+- STEP2/STEP3에 없는 새로운 장애 원인·인과관계·장애 노드·절차 생성 금지
+- STEP1~3 결과 또는 입력 데이터에 없는 통신 지식 추가 금지
 - 확정할 수 없는 내용을 확정적으로 기술 금지
   → 반드시 "가능성" 또는 "추가 확인 필요"로 표현
 
@@ -868,6 +929,7 @@ def build_loop_step_messages(
     step3_result: str = "",
     device_payload: str = "",
     allowed_list: str = "",
+    stats_payload: str = "",
 ) -> list[dict[str, str]]:
     template = LOOP_STEP_TEMPLATES[step_name]
 
@@ -880,6 +942,7 @@ def build_loop_step_messages(
         user_content = template.format(
             step1_result=step1_result,
             step2_result=step2_result,
+            stats_payload=stats_payload,
         )
     elif step_name == "step4":
         user_content = template.format(
@@ -948,11 +1011,44 @@ def build_loop_step3_messages(
     step1_result: str,
     step2_result: str,
 ) -> list[dict[str, str]]:
-    """STEP3 입력: STEP1+2 결과만."""
+    """
+    STEP3 입력: STEP1+2 결과 + 영향도 산정용 통계.
+    entity_id는 전달하지 않음 — 실제 장비명은 STEP4에서만 등장.
+    """
+    stats = _get_data(compact_rca_ir, "statistics", {})
+    hints = _get_data(compact_rca_ir, "rca_hints", {})
+    subscriber = _get_data(compact_rca_ir, "subscriber_summary", {})
+    entity = _get_data(compact_rca_ir, "entity_failure_contribution", {})
+
+    pattern_counts = hints.get("pattern_counts", {}) if hints else {}
+    top_mme = entity.get("top_mme", []) if entity else []
+
+    mme_distribution = [
+        {
+            "mme_label": f"MME-{idx + 1}",
+            "failure_contribution_pct": e.get("failure_contribution_pct", 0),
+        }
+        for idx, e in enumerate(top_mme)
+    ]
+
+    stats_payload = {
+        "failure_rate": stats.get("failure_rate", 0),
+        "candidate_pattern_ratio": {
+            "ran_pct": pattern_counts.get("ran_candidate_pct", 0),
+            "core_pct": pattern_counts.get("core_candidate_pct", 0),
+        },
+        "repeated_failure_ratio": subscriber.get("repeated_failure_ratio", 0),
+        "affected_imsi": subscriber.get("affected_imsi_count", 0),
+        "top_imsi_failure_share": subscriber.get("top_imsi_failure_share", 0),
+        "mme_failure_distribution": mme_distribution,
+    }
+    stats_payload_text = json.dumps(stats_payload, ensure_ascii=False, separators=(",", ":"))
+
     return build_loop_step_messages(
         "step3",
         step1_result=step1_result,
         step2_result=step2_result,
+        stats_payload=stats_payload_text,
     )
 
 

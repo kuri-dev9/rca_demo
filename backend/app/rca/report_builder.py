@@ -243,46 +243,6 @@ def _build_failure_flow(error_chains: list[dict[str, Any]]) -> list[dict[str, An
     return flows
 
 
-def _format_flow_payload_for_step2(error_chains: list[dict[str, Any]]) -> str:
-    """
-    STEP2 입력용 Top Error Chains / Failure Flow Summary 텍스트.
-    _ir_to_markdown의 동일 섹션과 같은 문구를 사용해
-    STEP2가 "Failure Flow Summary 문구를 그대로 사용"할 수 있게 한다.
-    """
-    if not error_chains:
-        return "(Flow 데이터 없음)"
-
-    flow_rows = _build_failure_flow(error_chains)
-
-    lines = ["Top Error Chains:"]
-    for row in error_chains[:8]:
-        first = row.get("first_error", {})
-        last = row.get("last_error", {})
-        first_text = f"{first.get('interface') or '-'} / {first.get('message') or '-'} / {first.get('cause') or '-'}"
-        last_text = f"{last.get('interface') or '-'} / {last.get('message') or '-'} / {last.get('cause') or '-'}"
-        lines.append(
-            f"- Call Type: {row.get('call_type') or '-'} | First: {first_text} | "
-            f"Last: {last_text} | Count: {row.get('count', 0):,}"
-        )
-
-    lines.append("")
-    lines.append("Failure Flow Summary:")
-    for flow in flow_rows[:8]:
-        call_type = flow.get("call_type", "-")
-        first_msg = flow.get("first_message", "-")
-        first_cause = flow.get("first_cause", "-")
-        last_msg = flow.get("last_message", "-")
-        last_cause = flow.get("last_cause", "-")
-        count = flow.get("count", 0)
-        if flow.get("is_single_node", False):
-            flow_text = f"{first_msg}({first_cause}) → (단일)"
-        else:
-            flow_text = f"{first_msg}({first_cause}) → {last_msg}({last_cause})"
-        lines.append(f"- Call Type: {call_type} | Flow: {flow_text} | Count: {count:,}")
-
-    return "\n".join(lines)
-
-
 def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
     """Compact RCA IR used by the LLM reasoning path."""
     stage_counter: Counter[str] = Counter()
@@ -764,194 +724,104 @@ STEP_SYSTEM_PROMPT = """\
 - 다음 STEP의 역할을 미리 수행하지 않는다.
 - 입력에 없는 값을 생성하지 않는다.
 - Interface / Message / Cause 이름을 번역하거나 변경하지 않는다.
-- STEP에서 JSON 출력 형식을 지시하면 그 JSON 객체 하나만 출력한다.
-  설명, 마크다운, 코드펜스(```) 등 JSON 외의 텍스트를 포함하지 않는다.
 """
 
 
 STEP1_TEMPLATE = """\
-STEP 1: 3GPP 의미 해석 (구조화 출력)
+STEP 1: 통계 기반 원인 파악
 
 역할:
-입력된 각 에러(interface / message / cause 조합)가
-3GPP 절차상 어느 노드 간 구간에서 발생하는 에러인지 해석하여
-아래 JSON 스키마로만 출력한다.
+아래 [입력 통계]만 사용하여 3GPP 절차 지식을 결합해
+각 에러 패턴(interface / message / cause 조합)의 발생 원인을 파악한다.
 
-출력 형식 (이 JSON 객체 하나만 출력. 설명, 마크다운, 코드펜스 등 다른 텍스트 금지):
-{{
-  "error_definitions": [
-    {{
-      "interface": "...",
-      "message": "...",
-      "cause": "...",
-      "segment": "...",
-      "meaning": "...",
-      "domain_candidates": ["..."]
-    }}
-  ]
-}}
-
-필드 작성 규칙:
-- interface / message / cause: [입력 에러 목록]의 값을 그대로 복사한다.
-- segment: 3GPP 절차상 노드 간 구간 (예: MME-HSS, MME-SGW, eNB-MME)
-- meaning: 해당 message/cause의 3GPP상 의미를 1~2문장으로 작성. 확정할 수 없으면
-  "가능성" 또는 "추가 확인 필요"를 포함해 작성한다.
-- domain_candidates: 아래 중 해당하는 값만 배열로 포함한다 (복수 가능):
-  ["Subscriber/HSS", "Core/EPC", "RAN/Access", "UE/NAS State", "Unknown"]
+수행:
+- 각 에러 패턴에 대해 아래를 작성한다:
+  - 3GPP 절차상 노드 간 구간 (예: MME-HSS, MME-SGW, eNB-MME)
+  - 해당 message/cause의 3GPP상 의미
+  - [입력 통계]의 수치(count, 영향 IMSI/MME/eNB 수)를 인용한 원인 파악
+    (예: "건수 X건, 영향 IMSI Y명 — 3GPP상 Z가 원인일 가능성")
+  - 확정할 수 없으면 "가능성" 또는 "추가 확인 필요"로 표현
 
 금지:
-- JSON 객체 외의 텍스트(설명, 마크다운, 코드펜스) 출력 금지
 - 실제 장비명(entity_id) 언급 금지
-- 건수/비율 계산 금지
-- [입력 에러 목록]에 없는 interface/message/cause 생성 금지
+- [입력 통계]에 없는 수치 생성 금지
 - 조치 방향 작성 금지
+- 에러 패턴 간 상관관계 분석(STEP2 역할) 또는 원인 확정(STEP3 역할) 수행 금지
 
-[입력 에러 목록]
+[입력 통계]
 {payload}
 """
 
 STEP2_TEMPLATE = """\
-STEP 2: Flow 기반 상관 분석 (구조화 출력)
+STEP 2: 상관관계 분석
 
 역할:
-[STEP1 구조화 결과]의 3GPP 의미 해석과 [입력 Flow 데이터]만 사용하여
-에러 간 연관성을 분석하고 아래 JSON 스키마로만 출력한다.
-STEP1의 자연어 서술이나 통신 일반 지식에 기반한 자유 추론을 사용하지 않는다.
+[STEP1 결과]만 사용하여 에러 패턴 간 상관관계를 분석한다.
+[STEP1 결과]에 없는 데이터나 통신 일반 지식을 추가로 사용하지 않는다.
 
 [STRICT_CHAIN_RULE]
 직접적인 인과관계 표현("A 때문에 B 발생", "A가 B를 유발", "A → B")은
-[입력 Flow 데이터]에서 동일 call_type의 동일 Failure Flow / Error Chain을
-구성하는 first_error → last_error 사이에서만 사용할 수 있다.
-서로 다른 flow에 속한 에러는 절대 직접 인과관계로 연결하지 않는다.
+[STEP1 결과]에서 동일 call_type/절차로 명시된 에러 패턴 사이에서만 사용한다.
+[STEP1 결과]에 명시되지 않은 연결을 임의로 만들지 않는다.
 
 [DOMAIN_GROUP_RULE]
-서로 다른 flow라도 동일 도메인으로 묶는 것은 허용하나,
+서로 다른 절차의 에러라도 동일 도메인으로 묶는 것은 허용하나,
 "A가 B를 유발했다" 식 표현은 금지하며 "공통 도메인 후보"로만 표현한다.
 
-출력 형식 (이 JSON 객체 하나만 출력. 설명, 마크다운, 코드펜스 등 다른 텍스트 금지):
-{{
-  "related_groups": [
-    {{
-      "group_name": "...",
-      "call_type": "...",
-      "flow": "...",
-      "count": 0,
-      "evidence": "...",
-      "interpretation": "..."
-    }}
-  ],
-  "independent_groups": [
-    {{
-      "call_type": "...",
-      "interface": "...",
-      "message": "...",
-      "cause": "...",
-      "count": 0,
-      "independence_basis": "..."
-    }}
-  ],
-  "domain_groups": [
-    {{
-      "domain": "...",
-      "included_failures": ["..."],
-      "count_total": 0,
-      "evidence": "...",
-      "caution": "..."
-    }}
-  ]
-}}
-
-배열별 작성 규칙:
-- related_groups: [입력 Flow 데이터]의 Failure Flow Summary 또는 Top Error Chains에
-  존재하는 flow만 포함한다. flow 필드는 Failure Flow Summary 문구를 그대로 사용하며,
-  임의로 flow를 합치거나 수정하지 않는다. 동일 flow 안의 first_error → last_error만
-  interpretation에서 절차적 연관으로 표현한다.
-- independent_groups: first_error와 last_error가 동일하거나 Failure Flow Summary에서
-  "(단일)"로 표시된 항목만 포함한다. independence_basis에 "연쇄", "유발", "이어짐"
-  표현 금지.
-- domain_groups: domain은 아래 중 하나만 사용한다:
-  ["Subscriber/HSS", "Core/EPC", "RAN/Access", "UE/NAS State", "Unknown"]
-  도메인 그룹은 원인 확정이 아니며, 서로 다른 flow끼리 인과관계로 연결하지 않는다.
+수행:
+- [STEP1 결과]에 등장한 에러 패턴들을 아래로 분류한다:
+  1. 연관 그룹: 동일 절차 내에서 연쇄적으로 보이는 에러 패턴 묶음
+  2. 독립 그룹: 다른 에러와 무관하게 단독으로 발생하는 패턴
+  3. 도메인 후보 그룹: Subscriber/HSS, Core/EPC, RAN/Access, UE/NAS State, Unknown
+     중 하나로 묶을 수 있는 패턴 (원인 확정 아님)
+- 각 그룹에 대해 [STEP1 결과]에 언급된 근거(수치, 3GPP 의미)를 인용한다.
 
 금지:
-- JSON 객체 외의 텍스트(설명, 마크다운, 코드펜스) 출력 금지
-- call_type, interface, message, stage, cause 명칭을 임의로 바꾸거나 약어/유사어로 표기 금지
-- [입력 Flow 데이터] 또는 [STEP1 구조화 결과]에 없는 노드/인터페이스/절차 생성 금지
 - 실제 장비명(entity_id) 언급 금지
+- [STEP1 결과]에 없는 수치/노드/절차 생성 금지
 - 조치 방향 작성 금지
+- STEP1 내용을 그대로 반복 출력 금지
+- "연쇄", "유발", "이어짐" 표현은 1번 연관 그룹에만 사용, 2번 독립 그룹에는 금지
 - "Based on", "Procedural Links", "Root Cause Origin" 등 정의되지 않은 임의 표현 금지
 - 다음과 같은 임의 통합/축약 명칭 금지: No_Service, RADIO_CONTEXT_REJECT, Not_Subscribed / Barred
-- 다음과 같이 서로 다른 flow를 임의로 연결하는 표현 금지:
-  CREATE_SESSION(Timeout) → PDN_REJECT(Not_Subscribed / Barred)
-  AIR_AIA(Unassigned) → AUTH(Synch_failure)
 
-[STEP1 구조화 결과]
-{step1_structured_json}
-
-[입력 Flow 데이터]
-{flow_payload}
+[STEP1 결과]
+{step1_result}
 """
 
 STEP3_TEMPLATE = """\
-STEP 3: 통계 기반 영향도 산정 (구조화 출력)
+STEP 3: 원인 확정
 
 역할:
-[STEP2 구조화 결과]와 [입력 통계]만 사용하여 영향도를 산정하고
-아래 JSON 스키마로만 출력한다. STEP1 결과나 STEP2의 자연어 서술, 통신 일반
-지식에 기반한 추정은 사용하지 않는다. 장애에 대한 새로운 설명이나 원인 서술을
-만들지 않는다.
+[STEP1 결과]의 3GPP 기반 원인 파악과 [STEP2 결과]의 상관관계 분석만 사용하여
+원인을 확정한다. 새로운 데이터나 통신 일반 지식을 추가로 사용하지 않는다.
 
-출력 형식 (이 JSON 객체 하나만 출력. 설명, 마크다운, 코드펜스 등 다른 텍스트 금지):
-{{
-  "impact_assessment": [
-    {{
-      "domain": "...",
-      "impact": "High/Medium/Low",
-      "basis": "...",
-      "limitation": "..."
-    }}
-  ],
-  "priority_domains": ["..."],
-  "confidence": "..."
-}}
-
-domain은 아래 5개만 사용한다 (해당 근거가 없는 영역은 배열에서 생략 가능):
-- Core/EPC
-- Subscriber/HSS
-- RAN/Access
-- UE/NAS State
-- MME Node Concentration
-
-[IMPACT_SCORING_RULE]
-- candidate_pattern_ratio.core_pct가 50% 이상이면 Core/EPC는 High 가능
-- candidate_pattern_ratio.ran_pct가 0%이면 RAN/Access는 High 금지
-- repeated_failure_ratio가 5% 미만이면 Subscriber/HSS 확산 영향도 High 금지
-- mme_failure_distribution상 MME 간 기여율 차이가 20% 미만이면
-  MME Node Concentration을 특정 MME 집중 장애로 표현하지 않는다 (Low 또는 "해당 없음")
-- failure_rate가 1% 미만이면 전체 서비스 영향도를 High로 평가하지 않는다
-- high_failure_rate_procedures에 있는 특정 절차(예: Attach_MO)의 실패율이 높더라도
-  해당 절차 단위의 영향도로만 표현하고 전체망 장애로 확대하지 않는다
-- 근거 수치가 기준에 미달하면 해당 영역은 Low 또는 "추가 확인 필요"로 표현한다
-- priority_domains는 impact_assessment에서 High로 평가된 domain만 포함한다.
-  High가 없으면 빈 배열로 둔다.
+수행:
+- [STEP2 결과]의 연관/독립/도메인 그룹별로 [STEP1 결과]의 원인 파악 내용을 종합하여
+  원인을 아래 중 하나로 분류한다:
+  - 주 원인 후보
+  - 보조 원인 후보
+  - 단정 불가
+- 영역(Core/EPC, Subscriber/HSS, RAN/Access, UE/NAS State)별로 영향도(High/Medium/Low)를
+  평가하되, [STEP1 결과]/[STEP2 결과]에 언급된 수치만 근거로 사용한다.
 
 금지:
-- JSON 객체 외의 텍스트(설명, 마크다운, 코드펜스) 출력 금지
 - 실제 장비명(entity_id) 언급 금지
-- [입력 통계]에 없는 수치 생성 금지
-- 통신 지식만으로 영향도를 추정하는 것 금지
+- [STEP1 결과], [STEP2 결과]에 없는 수치/노드/원인 생성 금지
+- 통신 지식만으로 원인이나 영향도를 추정하는 것 금지 — 반드시 STEP1/STEP2 근거를 인용
 - 조치 방향 작성 금지
-- 확정할 수 없는 내용을 확정적으로 기술 금지
+- STEP1, STEP2 내용을 그대로 반복 출력 금지
+- 확정할 수 없는 내용을 확정적으로 기술 금지 → "가능성" 또는 "추가 확인 필요"로 표현
 - 입력 데이터에 직접 존재하지 않으면 다음 표현 금지:
   GTP-U 경로 오류, Create Session Response 실패, S5/S8, Cell_Reselection_Failure,
   무선 구간 문제는 배제, 코어 네트워크 전반의 프로토콜 처리 오류, 대량 세션 요청,
   Congestion, CPU/Memory 부하
 
-[STEP2 구조화 결과]
-{step2_structured_json}
+[STEP1 결과]
+{step1_result}
 
-[입력 통계]
-{stats_payload}
+[STEP2 결과]
+{step2_result}
 """
 
 STEP4_TEMPLATE = """\
@@ -959,48 +829,24 @@ STEP 4: 최종 RCA 보고서
 
 역할:
 STEP4는 새로운 분석 단계가 아니다.
-[STEP3 구조화 결과]를 [실제 장비 데이터]에 매핑하여 운영자용 최종 보고서로
-재구성하는 단계다. STEP1/STEP2의 중간 서술에는 접근하지 않는다.
+[STEP3 결과]를 [실제 장비 데이터]에 매핑하여 운영자용 최종 보고서로 재구성한다.
+STEP1/STEP2의 중간 분석 내용에는 접근하지 않는다.
 
 [FINAL_REPORT_RULE]
 허용: STEP3 결과 요약 / 통계 요약 / 조치 방향 정리
 금지: 새로운 장애 원인 생성 / 새로운 인과관계 생성 / 새로운 장애 노드 생성 / 새로운 절차 생성
 
 [NO_NEW_KNOWLEDGE_RULE]
-[STEP3 구조화 결과] 또는 [실제 장비 데이터]에 없는 통신 지식(3GPP 절차 지식 등)을
-추가하지 않는다. 일반적인 통신 지식으로 보강하지 않는다.
-"가능성" 표현도 입력 근거가 있는 경우에만 사용한다.
+[STEP3 결과] 또는 [실제 장비 데이터]에 없는 통신 지식(3GPP 절차 지식 등)을 추가하지 않는다.
+일반적인 통신 지식으로 보강하지 않는다. "가능성" 표현도 입력 근거가 있는 경우에만 사용한다.
 
-다음 출력 구조를 이 순서와 형식으로 작성한다.
+출력 형식:
+- 영향도 요약: [STEP3 결과]의 영역별 영향도와 근거
+- 장애 위치: 실제 장비명과 인터페이스 기반으로 특정
+- RCA 판단: [STEP3 결과]의 주 원인 후보 / 보조 원인 후보 / 단정 불가 항목을 그대로 인용
+- 조치 방향: 아래 허용 목록의 장비/인터페이스 기준으로만 작성
 
-1. 요약
-- 전체 실패율:
-- 주요 실패 절차:
-- 주요 도메인 후보:
-- 특정 MME 집중 여부:
-- Burst 여부:
-
-2. 주요 근거
-
-[실제 장비 데이터]와 [STEP3 구조화 결과]에서 확인된 내용만 bullet(•)로 작성한다.
-
-3. RCA 판단
-
-[STEP3 구조화 결과]의 priority_domains와 impact_assessment만 근거로,
-아래 표현 중 해당하는 것만 사용해 작성한다:
-- 주 원인 후보:
-- 보조 원인 후보:
-- 단정 불가 항목:
-
-주의:
-- "근본 원인"으로 확정하지 않는다.
-- "가능성이 높다"는 표현은 통계 근거가 명확한 경우에만 사용한다.
-- 특정 장비 장애로 표현하려면 MME 기여도 차이가 20% 이상이어야 한다.
-
-4. 조치 권고
-
-[허용 장비 및 인터페이스 목록]에 있는 항목에 대해서만 점검 권고를 작성한다.
-형식: <interface> / <message> / <cause> 대상의 <점검 내용>
+조치 권고 형식: <interface> / <message> / <cause> 대상의 <점검 내용>
 
 허용 예:
 - S6a_Diameter / AIR_AIA / Unassigned 대상 IMSI의 HSS 가입자 프로파일 확인
@@ -1009,10 +855,11 @@ STEP4는 새로운 분석 단계가 아니다.
 - S1MME_NAS_EMM / ATTACH_REJECT / No_Suitable_Cells 대상의 TAC/PLMN/셀 선택 관련 로그 확인
 
 금지:
-- [STEP3 구조화 결과]에 없는 새로운 장애 원인·인과관계·장애 노드·절차 생성 금지
+- [STEP3 결과] 내용을 그대로 반복 출력 금지
 - 실제 장비 데이터에 없는 entity_id 생성 금지
 - 실제 데이터에 없는 수치 생성 금지
-- [STEP3 구조화 결과] 또는 입력 데이터에 없는 통신 지식 추가 금지
+- [STEP3 결과]에 없는 새로운 장애 원인·인과관계·장애 노드·절차 생성 금지
+- [STEP3 결과] 또는 입력 데이터에 없는 통신 지식 추가 금지
 - 확정할 수 없는 내용을 확정적으로 기술 금지
   → 반드시 "가능성" 또는 "추가 확인 필요"로 표현
 - 허용 목록에 없는 장비명, 인터페이스명, 기술 용어 작성 금지
@@ -1024,8 +871,8 @@ STEP4는 새로운 분석 단계가 아니다.
 [허용 장비 및 인터페이스 목록]
 {allowed_list}
 
-[STEP3 구조화 결과]
-{step3_structured_json}
+[STEP3 결과]
+{step3_result}
 
 [실제 장비 데이터]
 {device_payload}
@@ -1039,49 +886,15 @@ LOOP_STEP_TEMPLATES = {
 }
 
 
-def extract_step_json(text: str) -> dict[str, Any] | None:
-    """
-    STEP1~3 LLM 출력에서 JSON 객체를 추출한다.
-    코드펜스(```json ... ```)가 섞여 있거나 앞뒤에 잡담이 붙어 있어도
-    best-effort로 파싱한다. 실패하면 None을 반환한다.
-    """
-    if not text:
-        return None
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    try:
-        parsed = json.loads(cleaned)
-        return parsed if isinstance(parsed, dict) else None
-    except (json.JSONDecodeError, ValueError):
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            parsed = json.loads(cleaned[start:end + 1])
-            return parsed if isinstance(parsed, dict) else None
-        except (json.JSONDecodeError, ValueError):
-            return None
-    return None
-
-
 def build_loop_step_messages(
     step_name: str,
     payload: dict[str, Any] | None = None,
     *,
-    step1_structured_json: str = "",
-    step2_structured_json: str = "",
-    step3_structured_json: str = "",
+    step1_result: str = "",
+    step2_result: str = "",
+    step3_result: str = "",
     device_payload: str = "",
     allowed_list: str = "",
-    stats_payload: str = "",
-    flow_payload: str = "",
 ) -> list[dict[str, str]]:
     template = LOOP_STEP_TEMPLATES[step_name]
 
@@ -1089,18 +902,15 @@ def build_loop_step_messages(
         payload_text = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         user_content = template.format(payload=payload_text)
     elif step_name == "step2":
-        user_content = template.format(
-            step1_structured_json=step1_structured_json,
-            flow_payload=flow_payload,
-        )
+        user_content = template.format(step1_result=step1_result)
     elif step_name == "step3":
         user_content = template.format(
-            step2_structured_json=step2_structured_json,
-            stats_payload=stats_payload,
+            step1_result=step1_result,
+            step2_result=step2_result,
         )
     elif step_name == "step4":
         user_content = template.format(
-            step3_structured_json=step3_structured_json,
+            step3_result=step3_result,
             device_payload=device_payload,
             allowed_list=allowed_list,
         )
@@ -1115,14 +925,13 @@ def build_loop_step_messages(
 
 def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, str]]:
     """
-    STEP1 입력: 에러 목록만.
-    entity_id, 건수, 기여율 전달 안 함 — 3GPP 해석에 집중.
+    STEP1 입력: 통계 데이터만 (에러 패턴별 count / 영향 IMSI·MME·eNB 수).
+    entity_id는 전달하지 않음 — 통계 + 3GPP 기반 원인 파악에 집중.
     """
     shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
+    stats = _get_data(compact_rca_ir, "statistics", {})
 
-    # failure_flow는 loop mode에서 제외
-    # gemma4가 유사한 first/last 패턴을 반복 출력하는 루프 버그 유발
-    error_set: list[dict[str, str]] = []
+    error_stats: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for s in shared:
         key = (
@@ -1133,92 +942,58 @@ def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, 
         if key in seen:
             continue
         seen.add(key)
-        error_set.append({
+        error_stats.append({
             "call_type": s.get("call_type", "-"),
             "interface": s.get("interface", "-"),
             "message": s.get("message", "-"),
             "stage": s.get("stage", "-"),
             "cause": s.get("cause", "-"),
+            "count": s.get("count", 0),
+            "affected_imsi_count": s.get("affected_imsi_count", 0),
+            "affected_mme_count": s.get("affected_mme_count", 0),
+            "affected_enb_count": s.get("affected_enb_count", 0),
         })
 
     payload = {
-        "error_list": error_set,
+        "statistics": {
+            "failure_count": stats.get("failure_count", 0),
+            "failure_rate": stats.get("failure_rate", 0),
+        },
+        "error_stats": error_stats,
     }
     return build_loop_step_messages("step1", payload)
 
 
 def build_loop_step2_messages(
     compact_rca_ir: dict[str, Any],
-    step1_structured: dict[str, Any] | None,
+    step1_result: str,
 ) -> list[dict[str, str]]:
-    """
-    STEP2 입력: STEP1 구조화 JSON 결과 + Top Error Chains / Failure Flow Summary.
-    STEP1의 자유문장은 전달하지 않는다 — Flow 데이터를 직접 제공해
-    STEP2가 입력에 없는 flow를 만들지 못하게 한다.
-    """
-    error_chains = _get_data(compact_rca_ir, "error_chains", [])
-    flow_payload = _format_flow_payload_for_step2(error_chains)
-    step1_json_text = json.dumps(step1_structured or {}, ensure_ascii=False, separators=(",", ":"))
+    """STEP2 입력: STEP1 결과만. 추가 데이터를 주입하지 않는다."""
     return build_loop_step_messages(
         "step2",
-        step1_structured_json=step1_json_text,
-        flow_payload=flow_payload,
+        step1_result=step1_result,
     )
 
 
 def build_loop_step3_messages(
     compact_rca_ir: dict[str, Any],
-    step2_structured: dict[str, Any] | None,
+    step1_result: str,
+    step2_result: str,
 ) -> list[dict[str, str]]:
-    """
-    STEP3 입력: STEP2 구조화 JSON 결과 + 영향도 산정용 통계.
-    STEP1 결과와 STEP2의 자유문장은 전달하지 않는다.
-    entity_id는 전달하지 않음 — 실제 장비명은 STEP4에서만 등장.
-    """
-    stats = _get_data(compact_rca_ir, "statistics", {})
-    hints = _get_data(compact_rca_ir, "rca_hints", {})
-    subscriber = _get_data(compact_rca_ir, "subscriber_summary", {})
-    entity = _get_data(compact_rca_ir, "entity_failure_contribution", {})
-
-    pattern_counts = hints.get("pattern_counts", {}) if hints else {}
-    top_mme = entity.get("top_mme", []) if entity else []
-
-    mme_distribution = [
-        {
-            "mme_label": f"MME-{idx + 1}",
-            "failure_contribution_pct": e.get("failure_contribution_pct", 0),
-        }
-        for idx, e in enumerate(top_mme)
-    ]
-
-    stats_payload = {
-        "failure_rate": stats.get("failure_rate", 0),
-        "candidate_pattern_ratio": {
-            "ran_pct": pattern_counts.get("ran_candidate_pct", 0),
-            "core_pct": pattern_counts.get("core_candidate_pct", 0),
-        },
-        "repeated_failure_ratio": subscriber.get("repeated_failure_ratio", 0),
-        "affected_imsi": subscriber.get("affected_imsi_count", 0),
-        "top_imsi_failure_share": subscriber.get("top_imsi_failure_share", 0),
-        "mme_failure_distribution": mme_distribution,
-        "high_failure_rate_procedures": hints.get("high_failure_rate_procedures", {}) if hints else {},
-    }
-    stats_payload_text = json.dumps(stats_payload, ensure_ascii=False, separators=(",", ":"))
-    step2_json_text = json.dumps(step2_structured or {}, ensure_ascii=False, separators=(",", ":"))
-
+    """STEP3 입력: STEP1+STEP2 결과만. 추가 데이터를 주입하지 않는다."""
     return build_loop_step_messages(
         "step3",
-        step2_structured_json=step2_json_text,
-        stats_payload=stats_payload_text,
+        step1_result=step1_result,
+        step2_result=step2_result,
     )
 
 
 def build_loop_step4_messages(
     compact_rca_ir: dict[str, Any],
-    step3_structured: dict[str, Any] | None,
+    step3_result: str,
 ) -> list[dict[str, str]]:
     """
-    STEP4 입력: STEP3 구조화 JSON 결과 + 실제 장비 데이터.
+    STEP4 입력: 통계/실제 장비 데이터 + STEP3 결과만.
     STEP1/STEP2 결과는 전달하지 않는다. 여기서만 entity_id, 건수, 기여율 전달.
     """
     entity = _get_data(compact_rca_ir, "entity_failure_contribution", {})
@@ -1292,11 +1067,10 @@ def build_loop_step4_messages(
     allowed_items.extend(sorted(triple_set))
 
     allowed_list_text = "\n".join(f"- {item}" for item in allowed_items)
-    step3_json_text = json.dumps(step3_structured or {}, ensure_ascii=False, separators=(",", ":"))
 
     return build_loop_step_messages(
         "step4",
-        step3_structured_json=step3_json_text,
+        step3_result=step3_result,
         device_payload=device_payload_text,
         allowed_list=allowed_list_text,
     )
@@ -1304,24 +1078,26 @@ def build_loop_step4_messages(
 
 def build_loop_reasoning_steps(
     compact_rca_ir: dict[str, Any],
-    structured_results: list[dict[str, Any] | None],
+    previous_results: list[str],
 ) -> list[dict[str, str]]:
-    """
-    structured_results: 이전 STEP들의 파싱된 구조화 JSON 결과 (STEP1~3).
-    각 STEP은 직전 STEP의 구조화 결과만 입력으로 받는다 — 자유문장은 전달하지 않는다.
-    """
-    step_index = len(structured_results)
+    step_index = len(previous_results)
     if step_index == 0:
         return build_loop_step1_messages(compact_rca_ir)
     if step_index == 1:
-        return build_loop_step2_messages(compact_rca_ir, structured_results[0])
+        return build_loop_step2_messages(compact_rca_ir, previous_results[0])
     if step_index == 2:
-        return build_loop_step3_messages(compact_rca_ir, structured_results[1])
+        return build_loop_step3_messages(
+            compact_rca_ir,
+            previous_results[0],
+            previous_results[1],
+        )
     if step_index == 3:
-        return build_loop_step4_messages(compact_rca_ir, structured_results[2])
+        return build_loop_step4_messages(compact_rca_ir, previous_results[2])
     # 4 STEP 완료 후 추가 호출 시 STEP4 재사용
-    prior_step3 = structured_results[2] if len(structured_results) > 2 else None
-    return build_loop_step4_messages(compact_rca_ir, prior_step3)
+    return build_loop_step4_messages(
+        compact_rca_ir,
+        previous_results[2] if len(previous_results) > 2 else "",
+    )
 
 
 def build_report_prompt_from_reasoning(

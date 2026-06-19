@@ -76,19 +76,11 @@ def find_forbidden_terms(step_name: str, text: str) -> list[str]:
     return [term for term in candidates if term in text]
 
 
-def build_retry_instruction(violations: list[str], json_required: bool = False) -> str:
-    parts: list[str] = []
-    if violations:
-        joined = ", ".join(violations)
-        parts.append("위 출력에는 입력 데이터에 없는 명칭/표현이 포함되었으므로 제거하고 다시 작성하라.")
-        parts.append(f"발견된 금지 표현: {joined}")
-    if json_required:
-        parts.append(
-            "출력은 지정된 JSON 스키마 객체 하나만 포함해야 한다. "
-            "설명, 마크다운, 코드펜스(```) 등 JSON 외의 텍스트를 포함하지 마라."
-        )
-    parts.append(
+def build_retry_instruction(violations: list[str]) -> str:
+    joined = ", ".join(violations)
+    return (
+        "위 출력에는 입력 데이터에 없는 명칭/표현이 포함되었으므로 제거하고 다시 작성하라.\n"
+        f"발견된 금지 표현: {joined}\n"
         "입력 데이터에 존재하는 call_type, interface, message, stage, cause 명칭만 사용하고,\n"
-        "지정된 출력 형식을 그대로 유지하라."
+        "지정된 출력 구조를 그대로 유지하라."
     )
-    return "\n".join(parts)

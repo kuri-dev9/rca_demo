@@ -294,7 +294,7 @@ async def stream_rca_report(
         llm_call_index = 0
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                llm_payload = {"model": conv.model or RCA_MODEL, "messages": messages, "stream": True}
+                llm_payload = {"model": conv.model or RCA_MODEL, "messages": messages, "stream": True, "think": False}
                 llm_call_index += 1
                 yield prompt_debug_event(llm_call_index, "RCA LLM Prompt", llm_payload)
                 async with client.stream(
@@ -463,7 +463,7 @@ async def stream_rca_reasoning(
                         yield f"data: {json.dumps({'token': marker})}\n\n"
 
                     step_response_parts: list[str] = []
-                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
+                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "think": False, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
                     yield prompt_debug_event(step_index + 1, label, llm_payload)
                     async with client.stream(
                         "POST",
@@ -504,6 +504,7 @@ async def stream_rca_reasoning(
                                 "model": conv.model or RCA_MODEL,
                                 "messages": retry_messages,
                                 "stream": True,
+                                "think": False,
                                 "options": {"repeat_penalty": 1.3, "repeat_last_n": 256},
                             }
                             yield prompt_debug_event(step_index + 1, f"{label} (Retry)", retry_payload)

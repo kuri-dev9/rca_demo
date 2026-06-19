@@ -44,6 +44,7 @@ from app.rca.report_builder import (
     build_report_prompt_from_reasoning,
     build_loop_reasoning_steps,
     build_reasoning_messages,
+    extract_step_json,
     _ir_to_markdown,
 )
 
@@ -367,6 +368,9 @@ async def stream_rca_reasoning(
     async def generate():
         response_parts: list[str] = []
         step_results: list[str] = []
+        # STEP1~3의 파싱된 구조화 JSON 결과. 각 STEP은 직전 STEP의 구조화 결과만
+        # 입력으로 받는다 — 자유문장(step_results)을 다음 STEP에 전달하지 않는다.
+        structured_results: list[dict[str, Any] | None] = []
 
         async def run_verifier(step_response: str, step_label: str, step_index: int):
             if hallucination_provider == "gemini":
@@ -440,7 +444,7 @@ async def stream_rca_reasoning(
                 total_steps = len(loop_step_labels) if loop_mode else 1
                 for step_index in range(total_steps):
                     call_messages = (
-                        build_loop_reasoning_steps(compact_rca_ir, step_results)
+                        build_loop_reasoning_steps(compact_rca_ir, structured_results)
                         if loop_mode
                         else messages
                     )
@@ -484,21 +488,35 @@ async def stream_rca_reasoning(
                                 break
                     step_response = "".join(step_response_parts)
 
-                    if loop_mode and step_index in (1, 2, 3):
+                    # STEP1~3은 구조화 JSON 출력이 필수 — 다음 STEP이 이 결과만 입력받는다.
+                    needs_json = loop_mode and step_index in (0, 1, 2)
+                    parsed_structured: dict[str, Any] | None = None
+
+                    if loop_mode and (step_index in (1, 2, 3) or needs_json):
                         step_key = f"step{step_index + 1}"
-                        violations = find_forbidden_terms(step_key, step_response)
-                        if violations:
+                        violations = (
+                            find_forbidden_terms(step_key, step_response)
+                            if step_index in (1, 2, 3)
+                            else []
+                        )
+                        if needs_json:
+                            parsed_structured = extract_step_json(step_response)
+                        json_invalid = needs_json and parsed_structured is None
+
+                        if violations or json_invalid:
+                            reasons = list(violations)
+                            if json_invalid:
+                                reasons.append("JSON 형식 오류(파싱 불가)")
                             logger.warning(
-                                "rca loop %s forbidden terms detected: %s",
-                                logical_step, violations,
+                                "rca loop %s retry needed: %s", logical_step, reasons,
                             )
-                            retry_notice = f"\n*[{logical_step} 금지 표현 감지({', '.join(violations)}) — 재시도 중...]*\n\n"
+                            retry_notice = f"\n*[{logical_step} 재작성 필요({', '.join(reasons)}) — 재시도 중...]*\n\n"
                             response_parts.append(retry_notice)
                             yield f"data: {json.dumps({'token': retry_notice})}\n\n"
 
                             retry_messages = call_messages + [
                                 {"role": "assistant", "content": step_response},
-                                {"role": "user", "content": build_retry_instruction(violations)},
+                                {"role": "user", "content": build_retry_instruction(violations, json_required=needs_json)},
                             ]
                             retry_payload = {
                                 "model": conv.model or RCA_MODEL,
@@ -527,13 +545,19 @@ async def stream_rca_reasoning(
                                         break
                             retried_response = "".join(retry_parts)
                             if retried_response.strip():
-                                remaining = find_forbidden_terms(step_key, retried_response)
-                                if remaining:
-                                    logger.warning(
-                                        "rca loop %s forbidden terms persist after retry: %s",
-                                        logical_step, remaining,
-                                    )
                                 step_response = retried_response
+                                if needs_json:
+                                    parsed_structured = extract_step_json(step_response)
+                                remaining = (
+                                    find_forbidden_terms(step_key, step_response)
+                                    if step_index in (1, 2, 3)
+                                    else []
+                                )
+                                if remaining or (needs_json and parsed_structured is None):
+                                    logger.warning(
+                                        "rca loop %s issues persist after retry: violations=%s json_ok=%s",
+                                        logical_step, remaining, parsed_structured is not None,
+                                    )
                             del retry_parts, retried_response
 
                     step_results.append(step_response)
@@ -548,6 +572,20 @@ async def stream_rca_reasoning(
                                 corrected_result = verifier_event
                         if corrected_result is not None:
                             step_results[-1] = corrected_result
+                            if needs_json:
+                                verified_parsed = extract_step_json(step_results[-1])
+                                if verified_parsed is None:
+                                    logger.warning(
+                                        "rca loop %s verifier output is not valid JSON, "
+                                        "falling back to pre-verification structured result",
+                                        logical_step,
+                                    )
+                                else:
+                                    parsed_structured = verified_parsed
+
+                    if loop_mode:
+                        structured_results.append(parsed_structured if needs_json else None)
+
                     if loop_mode and step_index < total_steps - 1:
                         # STEP 완료 이벤트 — 프론트에서 현재 streamingContent를 messages에 flush
                         yield f"data: {json.dumps({'step_done': True, 'step_index': step_index})}\n\n"
@@ -572,7 +610,7 @@ async def stream_rca_reasoning(
             await db.commit()
 
         yield f"data: {json.dumps({'done': True})}\n\n"
-        del response_parts, step_results, full_response
+        del response_parts, step_results, structured_results, full_response
         gc.collect()
 
     return StreamingResponse(generate(), media_type="text/event-stream")

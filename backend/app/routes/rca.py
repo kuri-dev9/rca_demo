@@ -34,6 +34,7 @@ from app.rca.claude_verifier import (
     _build_user_prompt,
     verify_and_correct_step,
 )
+from app.rca.forbidden_terms import build_retry_instruction, find_forbidden_terms
 from app.rca.parser import parse_file
 from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
@@ -482,6 +483,59 @@ async def stream_rca_reasoning(
                             if chunk.get("done"):
                                 break
                     step_response = "".join(step_response_parts)
+
+                    if loop_mode and step_index in (1, 2, 3):
+                        step_key = f"step{step_index + 1}"
+                        violations = find_forbidden_terms(step_key, step_response)
+                        if violations:
+                            logger.warning(
+                                "rca loop %s forbidden terms detected: %s",
+                                logical_step, violations,
+                            )
+                            retry_notice = f"\n*[{logical_step} 금지 표현 감지({', '.join(violations)}) — 재시도 중...]*\n\n"
+                            response_parts.append(retry_notice)
+                            yield f"data: {json.dumps({'token': retry_notice})}\n\n"
+
+                            retry_messages = call_messages + [
+                                {"role": "assistant", "content": step_response},
+                                {"role": "user", "content": build_retry_instruction(violations)},
+                            ]
+                            retry_payload = {
+                                "model": conv.model or RCA_MODEL,
+                                "messages": retry_messages,
+                                "stream": True,
+                                "options": {"repeat_penalty": 1.3, "repeat_last_n": 256},
+                            }
+                            yield prompt_debug_event(step_index + 1, f"{label} (Retry)", retry_payload)
+                            retry_parts: list[str] = []
+                            async with client.stream(
+                                "POST",
+                                f"{settings.ollama_base_url}/api/chat",
+                                json=retry_payload,
+                            ) as retry_response:
+                                retry_response.raise_for_status()
+                                async for line in retry_response.aiter_lines():
+                                    if not line:
+                                        continue
+                                    chunk = json.loads(line)
+                                    content = chunk.get("message", {}).get("content", "")
+                                    if content:
+                                        response_parts.append(content)
+                                        retry_parts.append(content)
+                                        yield f"data: {json.dumps({'token': content})}\n\n"
+                                    if chunk.get("done"):
+                                        break
+                            retried_response = "".join(retry_parts)
+                            if retried_response.strip():
+                                remaining = find_forbidden_terms(step_key, retried_response)
+                                if remaining:
+                                    logger.warning(
+                                        "rca loop %s forbidden terms persist after retry: %s",
+                                        logical_step, remaining,
+                                    )
+                                step_response = retried_response
+                            del retry_parts, retried_response
+
                     step_results.append(step_response)
                     should_verify_step2 = loop_mode and step_index == 1 and hallucination_step2
                     should_verify_step3 = loop_mode and step_index == 2 and hallucination_step3

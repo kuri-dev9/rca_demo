@@ -243,6 +243,46 @@ def _build_failure_flow(error_chains: list[dict[str, Any]]) -> list[dict[str, An
     return flows
 
 
+def _format_flow_payload_for_step2(error_chains: list[dict[str, Any]]) -> str:
+    """
+    STEP2 입력용 Top Error Chains / Failure Flow Summary 텍스트.
+    _ir_to_markdown의 동일 섹션과 같은 문구를 사용해
+    STEP2가 "Failure Flow Summary 문구를 그대로 사용"할 수 있게 한다.
+    """
+    if not error_chains:
+        return "(Flow 데이터 없음)"
+
+    flow_rows = _build_failure_flow(error_chains)
+
+    lines = ["Top Error Chains:"]
+    for row in error_chains[:8]:
+        first = row.get("first_error", {})
+        last = row.get("last_error", {})
+        first_text = f"{first.get('interface') or '-'} / {first.get('message') or '-'} / {first.get('cause') or '-'}"
+        last_text = f"{last.get('interface') or '-'} / {last.get('message') or '-'} / {last.get('cause') or '-'}"
+        lines.append(
+            f"- Call Type: {row.get('call_type') or '-'} | First: {first_text} | "
+            f"Last: {last_text} | Count: {row.get('count', 0):,}"
+        )
+
+    lines.append("")
+    lines.append("Failure Flow Summary:")
+    for flow in flow_rows[:8]:
+        call_type = flow.get("call_type", "-")
+        first_msg = flow.get("first_message", "-")
+        first_cause = flow.get("first_cause", "-")
+        last_msg = flow.get("last_message", "-")
+        last_cause = flow.get("last_cause", "-")
+        count = flow.get("count", 0)
+        if flow.get("is_single_node", False):
+            flow_text = f"{first_msg}({first_cause}) → (단일)"
+        else:
+            flow_text = f"{first_msg}({first_cause}) → {last_msg}({last_cause})"
+        lines.append(f"- Call Type: {call_type} | Flow: {flow_text} | Count: {count:,}")
+
+    return "\n".join(lines)
+
+
 def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
     """Compact RCA IR used by the LLM reasoning path."""
     stage_counter: Counter[str] = Counter()
@@ -751,84 +791,137 @@ STEP 1: 에러 해석
 """
 
 STEP2_TEMPLATE = """\
-STEP 2: 상관 분석
+STEP 2: 데이터 기반 상관 분석
 
 역할:
-STEP1의 에러 해석 결과를 기반으로
-에러 간 인과관계와 독립/연관 여부를 분석한다.
+아래 [입력 Flow 데이터]와 STEP1 결과를 기반으로,
+정해진 출력 구조 1~3에 따라서만 작성한다.
+자유서술로 새로운 연쇄나 인과관계를 만들지 않는다.
 
 [STRICT_CHAIN_RULE]
-직접적인 인과관계 표현("A 때문에 B 발생", "A가 B를 유발")은
-동일 절차(call_type) 안에서 동일 Failure Flow / Error Chain을 구성하는
-이벤트 사이에서만 사용할 수 있다.
-서로 다른 절차(call_type)에 속한 에러는 직접 인과관계로 연결하지 않는다.
-
-허용 예시 (동일 Flow 내부):
-AIR_AIA(Unassigned) → UE_CONTEXT_RELEASE_COMMAND(NAS_Authentication_Failure)
-
-금지 예시 (서로 다른 Flow를 인과관계로 연결):
-AIR_AIA(Unassigned) → Requested_service_option_not_subscribed
-CREATE_SESSION_REQUEST(TIMEOUT) → Network_failure
-위 두 관계는 동일 Flow에 존재하지 않으면 표현 금지.
+직접적인 인과관계 표현("A 때문에 B 발생", "A가 B를 유발", "A → B")은
+[입력 Flow 데이터]에서 동일 call_type의 동일 Failure Flow / Error Chain을
+구성하는 first_error → last_error 사이에서만 사용할 수 있다.
+서로 다른 flow에 속한 에러는 절대 직접 인과관계로 연결하지 않는다.
 
 [DOMAIN_GROUP_RULE]
-서로 다른 Error Chain이라도 동일 도메인(HSS, Subscriber Profile, EPC Signaling, RAN 등)으로
-묶어서 설명하는 것은 허용한다.
-단, 이 경우에도 "A가 B를 유발했다" / "A 때문에 B가 발생했다" 식의 인과관계 표현은 금지한다.
-대신 "공통 원인 후보" 또는 "동일 도메인 계열 장애" 표현만 사용한다.
+서로 다른 flow라도 동일 도메인으로 묶는 것은 허용하나,
+"A가 B를 유발했다" 식 표현은 금지하며 "공통 도메인 후보"로만 표현한다.
 
-수행:
-- 에러들을 그룹으로 분류한다:
-  - 동일 절차(call_type) 내에서 연쇄적으로 발생하는 에러 그룹 (Failure Flow / Error Chain)
-  - 서로 독립적인 에러 그룹
-- 동일 그룹 내부에서만 인과관계 가능성을 기술한다.
-- 서로 다른 그룹 간에는 도메인 단위 공통 원인 후보 여부만 기술한다.
+다음 출력 구조를 이 순서와 형식으로 모두 작성한다.
 
-금지:
+1. 입력 Flow 기준 연관 그룹
+
+[입력 Flow 데이터]의 Failure Flow Summary 또는 Top Error Chains에 존재하는
+flow만 나열한다. 존재하지 않는 flow는 만들지 않는다.
+
+각 항목 형식:
+- 그룹명:
+- Call Type:
+- Flow:
+- Count:
+- 근거:
+- 해석:
+
+주의:
+- Flow는 [입력 Flow 데이터]의 Failure Flow Summary 문구를 그대로 사용한다.
+- 임의로 flow를 합치거나 수정하지 않는다.
+- 동일 flow 안의 first_error → last_error만 절차적 연관으로 표현한다.
+
+2. 단일 노드/독립 실패 그룹
+
+first_error와 last_error가 동일하거나 Failure Flow Summary에서 "(단일)"로
+표시된 항목만 나열한다.
+
+각 항목 형식:
+- Call Type:
+- Interface:
+- Message:
+- Cause:
+- Count:
+- 독립 판단 근거:
+
+주의:
+- 단일 실패는 다른 실패의 결과로 연결하지 않는다.
+- "연쇄", "유발", "이어짐" 표현 금지.
+
+3. 도메인 후보 그룹
+
+[입력 Flow 데이터]에 존재하는 interface/message/cause 기준으로만
+도메인 후보를 묶는다.
+
+도메인 후보는 아래 중 하나만 사용한다:
+- Subscriber/HSS
+- Core/EPC
+- RAN/Access
+- UE/NAS State
+- Unknown
+
+각 항목 형식:
+- 도메인:
+- 포함 실패:
+- Count 합계:
+- 근거:
+- 주의사항:
+
+주의:
+- 도메인 그룹은 원인 확정이 아니다.
+- 서로 다른 flow끼리 인과관계로 연결하지 않는다.
+
+공통 금지:
+- 한국어 외 언어(영문 제목, 영문 설명, 임의 영문 요약 문장) 작성 금지
+- call_type, interface, message, stage, cause 명칭을 임의로 바꾸거나 약어/유사어로 표기 금지
+- [입력 Flow 데이터] 또는 STEP1 결과에 없는 노드/인터페이스/절차 생성 금지
 - 실제 장비명(entity_id) 언급 금지
-- 건수/비율 언급 금지
-- 장애 위치 확정 금지
 - 조치 방향 작성 금지
 - STEP1 내용을 그대로 반복 출력 금지
-- 동일 Failure Flow/Error Chain에 속하지 않는 에러 간 직접 인과관계 표현 금지
-- 입력 데이터에 없는 연쇄 장애(추가 노드, 추가 단계) 생성 금지
+- "Based on", "Procedural Links", "Root Cause Origin" 등 정의되지 않은 임의 표현 금지
+- 다음과 같은 임의 통합/축약 명칭 금지: No_Service, RADIO_CONTEXT_REJECT, Not_Subscribed / Barred
+- 다음과 같이 서로 다른 flow를 임의로 연결하는 표현 금지:
+  CREATE_SESSION(Timeout) → PDN_REJECT(Not_Subscribed / Barred)
+  AIR_AIA(Unassigned) → AUTH(Synch_failure)
+
+[입력 Flow 데이터]
+{flow_payload}
 
 [STEP1 결과]
 {step1_result}
 """
 
 STEP3_TEMPLATE = """\
-STEP 3: 장애 위치 확정
+STEP 3: 통계 기반 영향도 산정
 
 역할:
-STEP1 에러 해석과 STEP2 상관 분석을 기반으로
-장애가 발생한 노드/인터페이스를 특정한다.
+STEP3는 영향도 산정 전용 단계다. 장애에 대한 새로운 설명이나 원인 서술을
+만들지 않는다. 아래 [입력 통계]에 있는 수치만 근거로 영향도를 산정한다.
+
+다음 출력 구조를 이 순서와 형식으로 작성한다.
+
+1. 영역별 영향도
+
+영역은 아래 5개만 사용한다 (해당 근거가 없는 영역은 생략 가능):
+- Core/EPC
+- Subscriber/HSS
+- RAN/Access
+- UE/NAS State
+- MME Node Concentration
+
+각 영역마다 아래 항목 형식만 사용한다:
+- 영역:
+- 영향도: High / Medium / Low
+- 산정 근거:
+- 제한 사항:
 
 [IMPACT_SCORING_RULE]
-영향도(High/Medium/Low)는 [입력 통계]에 있는 수치만 근거로 산정한다.
-3GPP 절차 지식이나 통신 경험 기반 추정으로 영향도를 매기지 않는다.
-
-사용 가능한 데이터 ([입력 통계]에서만 인용):
-- failure_rate
-- candidate_pattern_ratio (RAN/Core 후보 패턴 비율)
-- repeated_failure_ratio
-- affected_imsi
-- top_imsi_failure_share
-- mme_failure_distribution
-
-판단 기준 (예시):
-- candidate_pattern_ratio의 RAN 비율이 0%면 RAN 영향도를 High로 평가하지 않는다.
-- repeated_failure_ratio가 5% 미만이면 Subscriber 확산 영향도를 High로 평가하지 않는다.
+- candidate_pattern_ratio.core_pct가 50% 이상이면 Core/EPC는 High 가능
+- candidate_pattern_ratio.ran_pct가 0%이면 RAN/Access는 High 금지
+- repeated_failure_ratio가 5% 미만이면 Subscriber/HSS 확산 영향도 High 금지
 - mme_failure_distribution상 MME 간 기여율 차이가 20% 미만이면
-  특정 MME 집중 장애로 표현하지 않는다.
-- 근거 수치가 기준에 미달하면 해당 영역은 Low 또는 "추가 확인 필요"로 표현한다.
-
-수행:
-- 각 에러 그룹별로 장애 발생 노드/인터페이스를 특정한다
-- RAN/Access 영역과 Core Network 영역을 구분한다
-- Subscriber/UE 영역 관련 여부를 판단한다
-- 각 영역별 영향도를 [입력 통계] 수치에 근거하여 High / Medium / Low 로 평가하고
-  판단에 사용한 수치를 함께 명시한다
+  MME Node Concentration을 특정 MME 집중 장애로 표현하지 않는다 (Low 또는 "해당 없음")
+- failure_rate가 1% 미만이면 전체 서비스 영향도를 High로 평가하지 않는다
+- high_failure_rate_procedures에 있는 특정 절차(예: Attach_MO)의 실패율이 높더라도
+  해당 절차 단위의 영향도로만 표현하고 전체망 장애로 확대하지 않는다
+- 근거 수치가 기준에 미달하면 해당 영역은 Low 또는 "추가 확인 필요"로 표현한다
 
 금지:
 - 실제 장비명(entity_id) 언급 금지
@@ -837,6 +930,10 @@ STEP1 에러 해석과 STEP2 상관 분석을 기반으로
 - 조치 방향 작성 금지
 - STEP1, STEP2 내용을 그대로 반복 출력 금지
 - 확정할 수 없는 내용을 확정적으로 기술 금지
+- 입력 데이터에 직접 존재하지 않으면 다음 표현 금지:
+  GTP-U 경로 오류, Create Session Response 실패, S5/S8, Cell_Reselection_Failure,
+  무선 구간 문제는 배제, 코어 네트워크 전반의 프로토콜 처리 오류, 대량 세션 요청,
+  Congestion, CPU/Memory 부하
 
 [STEP1 결과]
 {step1_result}
@@ -849,38 +946,55 @@ STEP1 에러 해석과 STEP2 상관 분석을 기반으로
 """
 
 STEP4_TEMPLATE = """\
-STEP 4: 최종 레포트
+STEP 4: 최종 RCA 보고서
 
 역할:
 STEP4는 새로운 분석 단계가 아니다.
-STEP2와 STEP3 결과를 실제 장비 데이터에 매핑하여 재정리하는 단계다.
+STEP2와 STEP3 결과를 실제 장비 데이터에 매핑하여 재구성하는 단계다.
 
 [FINAL_REPORT_RULE]
-허용:
-- STEP2 결과 요약
-- STEP3 영향도 요약
-- 통계 요약
-- 조치 방향 정리
-
-금지:
-- 새로운 장애 원인 생성
-- 새로운 인과관계 생성
-- 새로운 장애 노드 생성
-- 새로운 절차 생성
+허용: STEP2 결과 요약 / STEP3 영향도 요약 / 통계 요약 / 조치 방향 정리
+금지: 새로운 장애 원인 생성 / 새로운 인과관계 생성 / 새로운 장애 노드 생성 / 새로운 절차 생성
 
 [NO_NEW_KNOWLEDGE_RULE]
-STEP1~3 결과 또는 [실제 장비 데이터]에 존재하지 않는 통신 지식을 추가하지 않는다.
-예 (STEP1~3 결과나 입력 데이터에 없으면 금지): "셀 커버리지 부족", "RF 품질 저하", "MME 내부 처리 오류"
+STEP1~3 결과 또는 [실제 장비 데이터]에 없는 통신 지식(3GPP 절차 지식 등)을 추가하지 않는다.
+일반적인 통신 지식으로 보강하지 않는다. "가능성" 표현도 입력 근거가 있는 경우에만 사용한다.
 
-수행:
-1. STEP3의 영향도 평가를 실제 장비 데이터와 매핑하여 정리
-2. 실제 entity_id, 건수, 기여율을 인용하여 장애 위치 구체화
-3. STEP2/STEP3 결과에 근거한 조치 방향 정리
+다음 출력 구조를 이 순서와 형식으로 작성한다.
 
-출력 형식:
-- 영향도 요약: RAN/Access, Core Network, Subscriber/UE 각각의 영향도와 근거
-- 장애 위치: 실제 장비명과 인터페이스 기반으로 특정
-- 조치 방향: 아래 허용 목록의 장비/인터페이스 기준으로만 작성
+1. 요약
+- 전체 실패율:
+- 주요 실패 절차:
+- 주요 도메인 후보:
+- 특정 MME 집중 여부:
+- Burst 여부:
+
+2. 주요 근거
+
+[실제 장비 데이터]와 STEP2/STEP3 결과에서 확인된 내용만 bullet(•)로 작성한다.
+
+3. RCA 판단
+
+아래 표현 중 해당하는 것만 사용해 작성한다:
+- 주 원인 후보:
+- 보조 원인 후보:
+- 단정 불가 항목:
+
+주의:
+- "근본 원인"으로 확정하지 않는다.
+- "가능성이 높다"는 표현은 통계 근거가 명확한 경우에만 사용한다.
+- 특정 장비 장애로 표현하려면 MME 기여도 차이가 20% 이상이어야 한다.
+
+4. 조치 권고
+
+[허용 장비 및 인터페이스 목록]에 있는 항목에 대해서만 점검 권고를 작성한다.
+형식: <interface> / <message> / <cause> 대상의 <점검 내용>
+
+허용 예:
+- S6a_Diameter / AIR_AIA / Unassigned 대상 IMSI의 HSS 가입자 프로파일 확인
+- S11_GTPv2C / CREATE_SESSION_REQUEST / TIMEOUT 구간의 MME-SGW 응답 로그 확인
+- S1MME_NAS_ESM / PDN_CONNECTIVITY_REJECT 대상의 가입자 서비스 옵션 확인
+- S1MME_NAS_EMM / ATTACH_REJECT / No_Suitable_Cells 대상의 TAC/PLMN/셀 선택 관련 로그 확인
 
 금지:
 - STEP1~3 내용을 그대로 반복 출력 금지
@@ -890,13 +1004,11 @@ STEP1~3 결과 또는 [실제 장비 데이터]에 존재하지 않는 통신 �
 - STEP1~3 결과 또는 입력 데이터에 없는 통신 지식 추가 금지
 - 확정할 수 없는 내용을 확정적으로 기술 금지
   → 반드시 "가능성" 또는 "추가 확인 필요"로 표현
-
-조치 방향 작성 규칙:
-- 아래 허용 목록에 있는 장비/인터페이스만 언급한다
-- 허용 목록에 없는 장비명, 인터페이스명, 기술 용어는 작성하지 않는다
-- Drive Test, 로드 밸런싱, RRC, X2, S5/S8 등
-  실제 데이터에 없는 기술 용어는 작성하지 않는다
-- 확인 항목은 "추가 확인 필요" 또는 "가능성"으로 표현한다
+- 허용 목록에 없는 장비명, 인터페이스명, 기술 용어 작성 금지
+- 다음 조치 표현 금지: HSS 부하분산 점검, HSS 이중화 점검, PCRF 점검, GUTI 매칭 실패,
+  AV 제공 지연, GTP-U 경로 점검, S5/S8 점검, KPI 대시보드 구축, CPU/Memory 부하 점검, Congestion 점검
+- 다음 표현 금지: 특정 핵심 노드(MME)를 중심으로, 인증 서버 가용성 증대, 중앙 데이터베이스,
+  인터페이스 신뢰도 문제, 서비스 품질 저하, 연결 실패 사례, 근본 원인으로 판단됩니다
 
 [허용 장비 및 인터페이스 목록]
 {allowed_list}
@@ -930,6 +1042,7 @@ def build_loop_step_messages(
     device_payload: str = "",
     allowed_list: str = "",
     stats_payload: str = "",
+    flow_payload: str = "",
 ) -> list[dict[str, str]]:
     template = LOOP_STEP_TEMPLATES[step_name]
 
@@ -937,7 +1050,7 @@ def build_loop_step_messages(
         payload_text = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         user_content = template.format(payload=payload_text)
     elif step_name == "step2":
-        user_content = template.format(step1_result=step1_result)
+        user_content = template.format(step1_result=step1_result, flow_payload=flow_payload)
     elif step_name == "step3":
         user_content = template.format(
             step1_result=step1_result,
@@ -999,10 +1112,16 @@ def build_loop_step2_messages(
     compact_rca_ir: dict[str, Any],
     step1_result: str,
 ) -> list[dict[str, str]]:
-    """STEP2 입력: STEP1 결과만."""
+    """
+    STEP2 입력: STEP1 결과 + Top Error Chains / Failure Flow Summary.
+    Flow 데이터를 직접 제공해 STEP2가 입력에 없는 flow를 만들지 못하게 한다.
+    """
+    error_chains = _get_data(compact_rca_ir, "error_chains", [])
+    flow_payload = _format_flow_payload_for_step2(error_chains)
     return build_loop_step_messages(
         "step2",
         step1_result=step1_result,
+        flow_payload=flow_payload,
     )
 
 
@@ -1041,6 +1160,7 @@ def build_loop_step3_messages(
         "affected_imsi": subscriber.get("affected_imsi_count", 0),
         "top_imsi_failure_share": subscriber.get("top_imsi_failure_share", 0),
         "mme_failure_distribution": mme_distribution,
+        "high_failure_rate_procedures": hints.get("high_failure_rate_procedures", {}) if hints else {},
     }
     stats_payload_text = json.dumps(stats_payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -1120,11 +1240,17 @@ def build_loop_step4_messages(
 
     shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
     iface_set: set[str] = set()
+    triple_set: set[str] = set()
     for s in shared:
         iface = s.get("interface")
         if iface:
             iface_set.add(iface)
+        message = s.get("message")
+        cause = s.get("cause")
+        if iface and message and cause:
+            triple_set.add(f"{iface} / {message} / {cause}")
     allowed_items.extend(sorted(iface_set))
+    allowed_items.extend(sorted(triple_set))
 
     allowed_list_text = "\n".join(f"- {item}" for item in allowed_items)
 

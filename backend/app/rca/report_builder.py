@@ -716,7 +716,6 @@ def build_reasoning_messages(observability: dict[str, Any]) -> list[dict[str, st
 
 STEP_SYSTEM_PROMPT = """\
 당신은 LTE/EPC 네트워크 장애 분석 전문가다.
-3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
 반드시 한국어로 작성한다.
 
 공통 규칙:
@@ -731,18 +730,22 @@ STEP1_TEMPLATE = """\
 STEP 1: 통계 기반 원인 파악
 
 역할:
-아래 [입력 통계]만 사용하여 3GPP 절차 지식을 결합해
-각 에러 패턴(interface / message / cause 조합)의 발생 원인을 파악한다.
+아래 [입력 통계]의 error_stats 배열에 있는 항목 각각에 대해
+3GPP 절차 지식을 결합하여 원인을 파악한다.
+3GPP TS 23.401, 24.301, 29.272, 29.274 기반으로 분석한다.
 
-수행:
-- 각 에러 패턴에 대해 아래를 작성한다:
-  - 3GPP 절차상 노드 간 구간 (예: MME-HSS, MME-SGW, eNB-MME)
-  - 해당 message/cause의 3GPP상 의미
-  - [입력 통계]의 수치(count, 영향 IMSI/MME/eNB 수)를 인용한 원인 파악
-    (예: "건수 X건, 영향 IMSI Y명 — 3GPP상 Z가 원인일 가능성")
-  - 확정할 수 없으면 "가능성" 또는 "추가 확인 필요"로 표현
+작성 형식 (error_stats 항목 하나당 정확히 아래 4줄, 다른 줄 추가 금지):
+에러: <interface> / <message> / <cause>
+구간: <3GPP 노드 간 구간>
+의미: <message/cause의 3GPP상 의미, 1문장>
+원인: <count와 영향 IMSI/MME/eNB 수를 인용한 원인 파악, 1문장. 확정 불가 시 "가능성" 또는 "추가 확인 필요" 포함>
+
+각 항목 작성 후 빈 줄 하나로 구분한다.
+error_stats 항목 수만큼만 작성하고, 마지막 항목을 쓴 뒤 바로 종료한다.
 
 금지:
+- 위 4줄 형식 외의 설명, 표, 목록, 머리말, 맺음말 작성 금지
+- 같은 문장이나 형식을 두 번 이상 반복해서 출력 금지
 - 실제 장비명(entity_id) 언급 금지
 - [입력 통계]에 없는 수치 생성 금지
 - 조치 방향 작성 금지

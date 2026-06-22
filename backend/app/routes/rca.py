@@ -59,7 +59,7 @@ RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 300.0
 BASE_NUM_PREDICT = 1024
 STEP4_NUM_PREDICT = 2048
-STEP2A_NUM_PREDICT_MULTIPLIER = 3
+STEP2A_NUM_PREDICT_MULTIPLIER = 4
 STEP3A_NUM_PREDICT_MULTIPLIER = 4
 QUALITY_THINKING_LOG_LIMIT = 2000
 _SAMPLE_FILE_CANDIDATES = [
@@ -439,7 +439,7 @@ async def stream_rca_reasoning(
             verifier_payload = {
                 "model": conv.model or RCA_MODEL,
                 "messages": verifier_messages,
-                "stream": True,
+                "stream": False,
                 "think": True,
                 "options": build_quality_options(think=True, multiplier=quality_multiplier),
             }

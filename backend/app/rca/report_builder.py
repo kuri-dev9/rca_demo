@@ -858,6 +858,7 @@ STEP 3-A: RCA 후보 정리
 작성 기준:
 - STEP2-A 관찰 결과를 RCA 후보의 주요 근거로 사용한다.
 - STEP3 Ranking은 RCA 후보 우선순위 판단에 사용한다.
+- Rank와 Count는 참고 정보로만 사용하고, RCA 후보 근거는 관찰 결과와 분산/집중 특성을 중심으로 작성한다.
 - 최소 통계는 분산 여부 및 영향 범위 판단에 사용한다.
 - 입력 데이터에 있는 패턴, 에러, Cause, 장비, 수치를 기준으로 작성한다.
 - 각 RCA 후보는 Failure Chain, 반복 출현 패턴, MME 분산 정보, Attach_MO 집중 정보, Core/RAN 분포 정보, STEP2-A 관찰 결과 중 최소 1개 이상을 근거로 작성한다.
@@ -1130,6 +1131,10 @@ def _format_fact_ranking_text(step3_result: str) -> str:
         count = row.get("count", "-")
         lines.append(f"{rank}위 {pattern} ({count})")
     return "\n".join(lines) if lines else step3_result
+
+
+def build_fact_ranking_text(step3_result: str) -> str:
+    return _format_fact_ranking_text(step3_result)
 
 
 def build_local_step2_enrichment_messages(

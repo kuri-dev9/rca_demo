@@ -40,6 +40,7 @@ from app.rca.parser import parse_file
 from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_fact_ranking_json,
+    build_fact_ranking_text,
     build_compact_rca_ir,
     build_compact_reasoning_json,
     build_local_step2_enrichment_messages,
@@ -772,13 +773,18 @@ async def stream_rca_reasoning(
 
                 step_response_parts: list[str] = []
                 if loop_mode and step_index == 2:
-                    step_response = build_fact_ranking_json(compact_rca_ir)
+                    ranking_json = build_fact_ranking_json(compact_rca_ir)
+                    step_response = build_fact_ranking_text(ranking_json)
                     response_parts.append(step_response)
                     step_response_parts.append(step_response)
                     yield prompt_debug_event(
                         step_index + 1,
                         f"{label} (Code Ranking)",
-                        {"source": "deterministic", "output": json.loads(step_response)},
+                        {
+                            "source": "deterministic",
+                            "output": json.loads(ranking_json),
+                            "display": step_response,
+                        },
                     )
                     yield f"data: {json.dumps({'token': step_response})}\n\n"
                 else:

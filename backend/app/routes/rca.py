@@ -426,8 +426,21 @@ async def stream_rca_reasoning(
                     timeout=QUALITY_STEP_TIMEOUT_SEC,
                 )
                 verifier_response.raise_for_status()
-                corrected_result = verifier_response.json().get("message", {}).get("content", "")
+                payload = verifier_response.json()
+                logger.warning("[QUALITY_RAW_RESPONSE] %s", json.dumps(payload, ensure_ascii=False)[:5000])
+                corrected_result = (
+                    payload.get("message", {}).get("content")
+                    or payload.get("response")
+                    or payload.get("content")
+                    or ""
+                )
                 if not corrected_result.strip():
+                    logger.warning(
+                        "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s payload=%s",
+                        list(payload.keys()),
+                        list(payload.get("message", {}).keys()) if isinstance(payload.get("message"), dict) else None,
+                        json.dumps(payload, ensure_ascii=False)[:2000],
+                    )
                     raise ValueError("Verifier 응답이 비어 있습니다")
             except Exception as exc:
                 exc_type = type(exc).__name__

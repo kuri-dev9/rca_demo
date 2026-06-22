@@ -756,22 +756,31 @@ STEP 3: 패턴 우선순위 분석 (Fact Ranking)
 
 출력 형식:
 Top Pattern Ranking
-1위
-<interface> / <message> / <cause>
-<count>건
-영향 IMSI/MME/eNB: <값>
+Pattern #1
+Call Type: <call_type>
+Interface: <interface>
+Message: <message>
+Cause: <cause>
+Count: <count>
+IMSI: <count>
+MME: <count>
+eNB: <count>
 Error Chain: <입력에 있으면 작성, 없으면 "확인 필요">
 
-평가 기준:
-- Count
-- IMSI 영향 범위
-- MME/eNB 분산도 또는 집중도
-- Error Chain 존재 여부
+Pattern #2
+...
 
-RCA 수행, 장애 원인 추론, 설정 오류 추론, 프로파일 추론은 하지 않는다.
+평가 기준:
+1. Count
+2. IMSI
+3. MME
+4. eNB
+
+정렬, 수치 인용, 순위 생성만 수행한다.
+RCA 수행, 장애 원인 추론, 설정 오류 추론, 프로파일 추론, 정책 추론은 하지 않는다.
 새 데이터·수치·노드·에러·Cause를 만들지 않는다.
 
-[STEP2/STEP2-A 관찰 결과]
+[STEP2 관찰 결과]
 {step2_result}
 
 [입력 통계]
@@ -818,30 +827,36 @@ QUALITY_STEP_SYSTEM_PROMPT = """\
 응답은 한국어로 간결하게 작성한다.
 """
 
-STEP2A_ENRICHMENT_TEMPLATE = """\
-STEP 2-A: Observation Enrichment
+STEP3A_RCA_TEMPLATE = """\
+STEP 3-A: Observation Enrichment + RCA 추론
 
 역할:
-- STEP3 RCA 추론을 위해 관찰 데이터를 압축 정리한다.
-- [입력 관찰 데이터], [STEP1 결과], [STEP2 결과]에 있는 Fact만 사용한다.
-- 상위 패턴별 Count, Failure Share, IMSI/MME/eNB 영향 범위, Error Chain을 정리한다.
-- 분산도/집중도는 수치 관찰로만 표현한다.
+- STEP1, STEP2, STEP3 결과를 이용해 상위 패턴 관찰을 강화하고 RCA 후보를 도출한다.
+- 영향 범위, 분산도, 집중도, 공통 특성을 분석한다.
+- 입력에 없는 패턴/에러/Cause/장비/수치를 만들지 않는다.
 
 허용:
-- 비율 계산
-- 영향 범위 정리
-- 분산도 정리
-- 집중도 정리
-- 상위 패턴 요약
+- Observation Enrichment
+- RCA 추론
+- 영향 범위 분석
+- 분산도 분석
+- 집중도 분석
+- 공통 특성 분석
+- 도메인 후보 제시
+- 우선순위 선정
+- 단정이 어려운 경우 "가능성", "추가 확인 필요"로 표현
 
 금지:
-- RCA 수행
-- 장애 원인 판단
-- 설정 오류 추론
-- 프로파일 불일치 추론
-- 새로운 패턴/에러/Cause 생성
+- 입력 데이터에 없는 Interface 생성
+- 입력 데이터에 없는 Message 생성
+- 입력 데이터에 없는 패턴 생성
+- 입력 데이터에 없는 에러 생성
+- 입력 데이터에 없는 Cause 생성
+- 입력 데이터에 없는 Error Chain 생성
+- 단말/UE/USIM 자체 원인 확정
 
 출력:
+관찰
 Pattern #1
 <interface> / <message> / <cause>
 Count: <count>
@@ -849,58 +864,30 @@ Failure Share: <pct>%
 IMSI: <count>
 MME: <count>
 eNB: <count>
-Error Chain:
-<message>(<cause>)
-↓
-<message>(<cause>)
+Error Chain: <입력에 있으면 작성, 없으면 "확인 필요">
 
-위 형식을 가능한 범위에서 반복한다. 값이 없으면 "확인 필요"로 쓴다.
+관찰 결과
+- <집중도/분산도/공통 특성>
 
-[STEP1 결과]
-{step1_result}
+RCA 후보
+1순위 <domain> — <근거>
+2순위 <domain> — <근거>
+3순위 <domain> — <근거>
 
-[STEP2 결과]
-{step2_result}
-
-[입력 관찰 데이터]
-{observation_payload}
-"""
-
-STEP3A_RCA_TEMPLATE = """\
-STEP 3-A: RCA 추론
-
-역할:
-- STEP1, STEP2/STEP2-A, STEP3 결과를 이용해 공통 특성을 분석한다.
-- 관찰된 패턴 기반으로 원인 후보와 도메인 후보를 도출한다.
-- 입력에 없는 패턴/에러/Cause/장비/수치를 만들지 않는다.
-
-허용:
-- RCA 추론
-- 원인 후보 제시
-- 도메인 후보 제시
-- 단정이 어려운 경우 "가능성", "추가 확인 필요"로 표현
-
-금지:
-- 입력 데이터에 없는 패턴 생성
-- 입력 데이터에 없는 에러 생성
-- 입력 데이터에 없는 Cause 생성
-- 단말/UE/USIM 자체 원인 확정
-
-출력:
-1. 공통 특성
-2. 주 원인 후보
-3. 보조 원인 후보
-4. 도메인 후보
-5. 추가 확인 필요 항목
+추가 확인 필요 항목
+- <항목>
 
 [STEP1 결과]
 {step1_result}
 
-[STEP2/STEP2-A 관찰 결과]
+[STEP2 관찰 그룹]
 {step2_result}
 
 [STEP3 Fact Ranking]
 {step3_result}
+
+[입력 관찰 데이터]
+{observation_payload}
 
 [입력 통계]
 {stats_payload}
@@ -1071,31 +1058,13 @@ def _observation_enrichment_payload(compact_rca_ir: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_local_step2_enrichment_messages(
-    compact_rca_ir: dict[str, Any],
-    step1_result: str,
-    step2_result: str,
-) -> list[dict[str, str]]:
-    observation_payload = _observation_enrichment_payload(compact_rca_ir)
-    return [
-        {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": STEP2A_ENRICHMENT_TEMPLATE.format(
-                step1_result=step1_result[:4000],
-                step2_result=step2_result[:4000],
-                observation_payload=observation_payload[:5000],
-            ),
-        },
-    ]
-
-
 def build_local_step3_rca_messages(
     compact_rca_ir: dict[str, Any],
     step1_result: str,
     step2_result: str,
     step3_result: str,
 ) -> list[dict[str, str]]:
+    observation_payload = _observation_enrichment_payload(compact_rca_ir)
     return [
         {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
         {
@@ -1104,6 +1073,7 @@ def build_local_step3_rca_messages(
                 step1_result=step1_result[:3000],
                 step2_result=step2_result[:4000],
                 step3_result=step3_result[:4000],
+                observation_payload=observation_payload[:5000],
                 stats_payload=_step3_stats_payload(compact_rca_ir),
             ),
         },

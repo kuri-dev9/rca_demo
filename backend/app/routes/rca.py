@@ -40,7 +40,6 @@ from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
-    build_local_step2_enrichment_messages,
     build_local_step3_rca_messages,
     build_rca_messages,
     build_report_prompt_from_reasoning,
@@ -55,8 +54,8 @@ logger = logging.getLogger(__name__)
 
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
-LOCAL_VERIFIER_TIMEOUT_SEC = 30.0
-LOCAL_VERIFIER_MAX_TOKENS = 900
+QUALITY_STEP_TIMEOUT_SEC = 30.0
+QUALITY_STEP_MAX_TOKENS = 900
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -372,31 +371,23 @@ async def stream_rca_reasoning(
         response_parts: list[str] = []
         step_results: list[str] = []
 
-        async def run_local_verifier(
+        async def run_step3a_quality_step(
             client: httpx.AsyncClient,
             step_response: str,
             step_label: str,
             step_index: int,
         ) -> Any:
-            if not loop_mode or step_index not in (1, 2):
+            if not loop_mode or step_index != 2:
                 yield ("result", step_response)
                 return
 
-            if step_index == 1:
-                verifier_step_label = "STEP 2-A Observation Enrichment"
-                verifier_messages = build_local_step2_enrichment_messages(
-                    compact_rca_ir,
-                    step_results[0] if step_results else "",
-                    step_response,
-                )
-            else:
-                verifier_step_label = "STEP 3-A RCA 추론"
-                verifier_messages = build_local_step3_rca_messages(
-                    compact_rca_ir,
-                    step_results[0] if step_results else "",
-                    step_results[1] if len(step_results) > 1 else "",
-                    step_response,
-                )
+            verifier_step_label = "STEP 3-A Observation Enrichment + RCA 추론"
+            verifier_messages = build_local_step3_rca_messages(
+                compact_rca_ir,
+                step_results[0] if step_results else "",
+                step_results[1] if len(step_results) > 1 else "",
+                step_response,
+            )
 
             header = f"\n\n---\n**[{verifier_step_label} 실행 중...]**\n\n"
             response_parts.append(header)
@@ -408,7 +399,7 @@ async def stream_rca_reasoning(
                 "stream": False,
                 "think": True,
                 "options": {
-                    "num_predict": LOCAL_VERIFIER_MAX_TOKENS,
+                    "num_predict": QUALITY_STEP_MAX_TOKENS,
                     "temperature": 0.1,
                     "repeat_penalty": 1.2,
                     "repeat_last_n": 128,
@@ -422,7 +413,7 @@ async def stream_rca_reasoning(
                         f"{settings.ollama_base_url}/api/chat",
                         json=verifier_payload,
                     ),
-                    timeout=LOCAL_VERIFIER_TIMEOUT_SEC,
+                    timeout=QUALITY_STEP_TIMEOUT_SEC,
                 )
                 verifier_response.raise_for_status()
                 corrected_result = verifier_response.json().get("message", {}).get("content", "")
@@ -624,10 +615,10 @@ async def stream_rca_reasoning(
                             step_response = retried_response
                         del retry_parts, retried_response
 
-                should_run_local_verifier = loop_mode and step_index in (1, 2)
-                if should_run_local_verifier:
+                should_run_step3a_quality_step = loop_mode and step_index == 2
+                if should_run_step3a_quality_step:
                     corrected_result = None
-                    async for event_type, verifier_event in run_local_verifier(
+                    async for event_type, verifier_event in run_step3a_quality_step(
                         client,
                         step_response,
                         logical_step,

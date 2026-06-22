@@ -20,6 +20,17 @@ GLOBAL_FORBIDDEN_TERMS: list[str] = [
     "Cell_Reselection",
     "PDP context",
     "Create Session Response",
+    "PGW",
+    "PCRF",
+    "프로비저닝",
+    "Provisioning",
+    "부하",
+    "성능 저하",
+    "패킷 유실",
+    "커버리지 부족",
+    "설정 오류",
+    "프로파일 불일치",
+    "내부 오류",
 ]
 
 # RCA 목적은 장비/네트워크 원인 분석이다 — 단말/가입자 측 원인 판단 및 조치는 모든 STEP에서 금지.
@@ -39,8 +50,18 @@ UE_DEVICE_FORBIDDEN_TERMS: list[str] = [
     "사용자 단말 점검",
     "단말 교체",
     "단말 세션 상태 문제",
+    "단말 설정 오류",
+    "단말 인증 실패",
+    "단말 재선택 문제",
+    "사용자 단말 상태",
 ]
 GLOBAL_FORBIDDEN_TERMS.extend(UE_DEVICE_FORBIDDEN_TERMS)
+
+# STEP1은 의미 해석만 수행 — 원인 추정/확정은 STEP3의 역할이므로 STEP1 출력에서는 금지.
+STEP1_FORBIDDEN_TERMS: list[str] = [
+    "원인",
+    "근본 원인",
+]
 
 STEP2_FORBIDDEN_TERMS: list[str] = [
     "Based on",
@@ -82,6 +103,7 @@ STEP4_FORBIDDEN_TERMS: list[str] = [
 ]
 
 _STEP_TERMS: dict[str, list[str]] = {
+    "step1": STEP1_FORBIDDEN_TERMS,
     "step2": STEP2_FORBIDDEN_TERMS,
     "step3": STEP3_FORBIDDEN_TERMS,
     "step4": STEP4_FORBIDDEN_TERMS,

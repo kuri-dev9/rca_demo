@@ -43,7 +43,7 @@ async def verify_and_correct_step_gemini(
             contents=user_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
-                max_output_tokens=4096,
+                max_output_tokens=1200,
             ),
         )
         tokens = []

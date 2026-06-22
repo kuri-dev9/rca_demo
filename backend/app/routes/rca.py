@@ -40,6 +40,8 @@ from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
+    build_local_step2_verifier_messages,
+    build_local_step3_verifier_messages,
     build_rca_messages,
     build_report_prompt_from_reasoning,
     build_loop_reasoning_steps,
@@ -53,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
+LOCAL_VERIFIER_TIMEOUT_SEC = 30.0
+LOCAL_VERIFIER_MAX_TOKENS = 900
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -368,6 +372,73 @@ async def stream_rca_reasoning(
         response_parts: list[str] = []
         step_results: list[str] = []
 
+        async def run_local_verifier(
+            client: httpx.AsyncClient,
+            step_response: str,
+            step_label: str,
+            step_index: int,
+        ) -> Any:
+            if not loop_mode or step_index not in (1, 2):
+                yield ("result", step_response)
+                return
+
+            if step_index == 1:
+                verifier_step_label = "STEP 2-A"
+                verifier_messages = build_local_step2_verifier_messages(
+                    compact_rca_ir,
+                    step_results[0] if step_results else "",
+                    step_response,
+                )
+            else:
+                verifier_step_label = "STEP 3-A"
+                verifier_messages = build_local_step3_verifier_messages(
+                    compact_rca_ir,
+                    step_results[1] if len(step_results) > 1 else "",
+                    step_response,
+                )
+
+            header = f"\n\n---\n**[{verifier_step_label} Verifier 보정 중...]**\n\n"
+            response_parts.append(header)
+            yield ("sse", f"data: {json.dumps({'token': header})}\n\n")
+
+            verifier_payload = {
+                "model": conv.model or RCA_MODEL,
+                "messages": verifier_messages,
+                "stream": False,
+                "think": True,
+                "options": {
+                    "num_predict": LOCAL_VERIFIER_MAX_TOKENS,
+                    "temperature": 0.1,
+                    "repeat_penalty": 1.2,
+                    "repeat_last_n": 128,
+                },
+            }
+            yield ("sse", prompt_debug_event(step_index + 20, f"RCA Loop {verifier_step_label}", verifier_payload))
+
+            try:
+                verifier_response = await asyncio.wait_for(
+                    client.post(
+                        f"{settings.ollama_base_url}/api/chat",
+                        json=verifier_payload,
+                    ),
+                    timeout=LOCAL_VERIFIER_TIMEOUT_SEC,
+                )
+                verifier_response.raise_for_status()
+                corrected_result = verifier_response.json().get("message", {}).get("content", "")
+                if not corrected_result.strip():
+                    raise ValueError("Verifier 응답이 비어 있습니다")
+            except Exception as exc:
+                logger.warning("%s optional verifier skipped: %s", verifier_step_label, exc, exc_info=True)
+                warning_text = f"{verifier_step_label} 실패/Timeout, {step_label} 결과 사용"
+                response_parts.append(f"\n\n*({warning_text})*\n\n")
+                yield ("sse", f"data: {json.dumps({'warning': warning_text})}\n\n")
+                yield ("result", step_response)
+                return
+
+            response_parts.append(corrected_result)
+            yield ("sse", f"data: {json.dumps({'token': corrected_result})}\n\n")
+            yield ("result", corrected_result)
+
         async def run_verifier(step_response: str, step_label: str, step_index: int):
             if hallucination_provider == "gemini":
                 from app.rca.gemini_verifier import (
@@ -434,37 +505,37 @@ async def stream_rca_reasoning(
             corrected_result = "".join(corrected_parts)
             yield ("result", corrected_result if corrected_result.strip() else step_response)
 
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                loop_step_labels = ["STEP 1", "STEP 2", "STEP 3", "STEP 4"]
-                total_steps = len(loop_step_labels) if loop_mode else 1
-                for step_index in range(total_steps):
-                    call_messages = (
-                        build_loop_reasoning_steps(compact_rca_ir, step_results)
-                        if loop_mode
-                        else messages
-                    )
-                    logical_step = loop_step_labels[step_index] if loop_mode else ""
-                    label = f"RCA Loop {logical_step}" if loop_mode else "RCA LLM Prompt"
-                    if loop_mode:
-                        try:
-                            marker_text = f"[{logical_step} 입력]\n"
-                            step_input = json.loads(call_messages[1]["content"].split(marker_text, 1)[1])
-                            logger.debug(
-                                "rca loop %s input payload=%s",
-                                logical_step,
-                                json.dumps(step_input, ensure_ascii=False),
-                            )
-                        except Exception:
-                            logger.debug("rca loop %s input payload parse failed", logical_step)
-                    if loop_mode:
-                        marker = f"\n{logical_step} 결과\n"
-                        response_parts.append(marker)
-                        yield f"data: {json.dumps({'token': marker})}\n\n"
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            loop_step_labels = ["STEP 1", "STEP 2", "STEP 3", "STEP 4"]
+            total_steps = len(loop_step_labels) if loop_mode else 1
+            for step_index in range(total_steps):
+                call_messages = (
+                    build_loop_reasoning_steps(compact_rca_ir, step_results)
+                    if loop_mode
+                    else messages
+                )
+                logical_step = loop_step_labels[step_index] if loop_mode else ""
+                label = f"RCA Loop {logical_step}" if loop_mode else "RCA LLM Prompt"
+                if loop_mode:
+                    try:
+                        marker_text = f"[{logical_step} 입력]\n"
+                        step_input = json.loads(call_messages[1]["content"].split(marker_text, 1)[1])
+                        logger.debug(
+                            "rca loop %s input payload=%s",
+                            logical_step,
+                            json.dumps(step_input, ensure_ascii=False),
+                        )
+                    except Exception:
+                        logger.debug("rca loop %s input payload parse failed", logical_step)
+                if loop_mode:
+                    marker = f"\n{logical_step} 결과\n"
+                    response_parts.append(marker)
+                    yield f"data: {json.dumps({'token': marker})}\n\n"
 
-                    step_response_parts: list[str] = []
-                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "think": False, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
-                    yield prompt_debug_event(step_index + 1, label, llm_payload)
+                step_response_parts: list[str] = []
+                llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "think": False, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
+                yield prompt_debug_event(step_index + 1, label, llm_payload)
+                try:
                     async with client.stream(
                         "POST",
                         f"{settings.ollama_base_url}/api/chat",
@@ -482,33 +553,45 @@ async def stream_rca_reasoning(
                                 yield f"data: {json.dumps({'token': content})}\n\n"
                             if chunk.get("done"):
                                 break
-                    step_response = "".join(step_response_parts)
+                except Exception as exc:
+                    logger.error("rca loop %s core step failed: %s", logical_step or "RCA", exc, exc_info=True)
+                    fallback_response = (
+                        f"[{logical_step or 'RCA'} 생성 실패: {type(exc).__name__}: {exc}]\n"
+                        "이 단계는 실패했지만 RCA 파이프라인은 중단하지 않고 다음 단계로 진행합니다."
+                    )
+                    response_parts.append(fallback_response)
+                    step_response_parts.append(fallback_response)
+                    failed_step_label = logical_step or "RCA"
+                    yield f"data: {json.dumps({'warning': f'{failed_step_label} 실패, 다음 단계 진행'})}\n\n"
+                    yield f"data: {json.dumps({'token': fallback_response})}\n\n"
+                step_response = "".join(step_response_parts)
 
-                    if loop_mode:
-                        step_key = f"step{step_index + 1}"
-                        violations = find_forbidden_terms(step_key, step_response)
-                        if violations:
-                            logger.warning(
-                                "rca loop %s forbidden terms detected: %s",
-                                logical_step, violations,
-                            )
-                            retry_notice = f"\n*[{logical_step} 금지 표현 감지({', '.join(violations)}) — 재시도 중...]*\n\n"
-                            response_parts.append(retry_notice)
-                            yield f"data: {json.dumps({'token': retry_notice})}\n\n"
+                if loop_mode:
+                    step_key = f"step{step_index + 1}"
+                    violations = find_forbidden_terms(step_key, step_response)
+                    if violations:
+                        logger.warning(
+                            "rca loop %s forbidden terms detected: %s",
+                            logical_step, violations,
+                        )
+                        retry_notice = f"\n*[{logical_step} 금지 표현 감지({', '.join(violations)}) — 재시도 중...]*\n\n"
+                        response_parts.append(retry_notice)
+                        yield f"data: {json.dumps({'token': retry_notice})}\n\n"
 
-                            retry_messages = call_messages + [
-                                {"role": "assistant", "content": step_response},
-                                {"role": "user", "content": build_retry_instruction(violations)},
-                            ]
-                            retry_payload = {
-                                "model": conv.model or RCA_MODEL,
-                                "messages": retry_messages,
-                                "stream": True,
-                                "think": False,
-                                "options": {"repeat_penalty": 1.3, "repeat_last_n": 256},
-                            }
-                            yield prompt_debug_event(step_index + 1, f"{label} (Retry)", retry_payload)
-                            retry_parts: list[str] = []
+                        retry_messages = call_messages + [
+                            {"role": "assistant", "content": step_response},
+                            {"role": "user", "content": build_retry_instruction(violations)},
+                        ]
+                        retry_payload = {
+                            "model": conv.model or RCA_MODEL,
+                            "messages": retry_messages,
+                            "stream": True,
+                            "think": False,
+                            "options": {"repeat_penalty": 1.3, "repeat_last_n": 256},
+                        }
+                        yield prompt_debug_event(step_index + 1, f"{label} (Retry)", retry_payload)
+                        retry_parts: list[str] = []
+                        try:
                             async with client.stream(
                                 "POST",
                                 f"{settings.ollama_base_url}/api/chat",
@@ -526,40 +609,55 @@ async def stream_rca_reasoning(
                                         yield f"data: {json.dumps({'token': content})}\n\n"
                                     if chunk.get("done"):
                                         break
-                            retried_response = "".join(retry_parts)
-                            if retried_response.strip():
-                                remaining = find_forbidden_terms(step_key, retried_response)
-                                if remaining:
-                                    logger.warning(
-                                        "rca loop %s forbidden terms persist after retry: %s",
-                                        logical_step, remaining,
-                                    )
-                                step_response = retried_response
-                            del retry_parts, retried_response
+                        except Exception as exc:
+                            logger.warning("rca loop %s forbidden retry failed: %s", logical_step, exc, exc_info=True)
+                            yield f"data: {json.dumps({'warning': f'{logical_step} 재시도 실패, 원본 결과 사용'})}\n\n"
+                        retried_response = "".join(retry_parts)
+                        if retried_response.strip():
+                            remaining = find_forbidden_terms(step_key, retried_response)
+                            if remaining:
+                                logger.warning(
+                                    "rca loop %s forbidden terms persist after retry: %s",
+                                    logical_step, remaining,
+                                )
+                            step_response = retried_response
+                        del retry_parts, retried_response
 
-                    step_results.append(step_response)
-                    should_verify_step2 = loop_mode and step_index == 1 and hallucination_step2
-                    should_verify_step3 = loop_mode and step_index == 2 and hallucination_step3
-                    if should_verify_step2 or should_verify_step3:
-                        corrected_result = None
-                        async for event_type, verifier_event in run_verifier(step_response, logical_step, step_index):
-                            if event_type == "sse":
-                                yield verifier_event
-                            elif event_type == "result":
-                                corrected_result = verifier_event
-                        if corrected_result is not None:
-                            step_results[-1] = corrected_result
-                    if loop_mode and step_index < total_steps - 1:
-                        # STEP 완료 이벤트 — 프론트에서 현재 streamingContent를 messages에 flush
-                        yield f"data: {json.dumps({'step_done': True, 'step_index': step_index})}\n\n"
-                        separator = "\n\n"
-                        response_parts.append(separator)
-                        yield f"data: {json.dumps({'token': separator})}\n\n"
-                    del step_response_parts, step_response
-        except httpx.HTTPError as exc:
-            step_label = loop_step_labels[step_index] if loop_mode else "RCA"
-            yield f"data: {json.dumps({'error': f'[{step_label}] {str(exc)}'})}\n\n"
-            return
+                should_run_local_verifier = loop_mode and step_index in (1, 2)
+                if should_run_local_verifier:
+                    corrected_result = None
+                    async for event_type, verifier_event in run_local_verifier(
+                        client,
+                        step_response,
+                        logical_step,
+                        step_index,
+                    ):
+                        if event_type == "sse":
+                            yield verifier_event
+                        elif event_type == "result":
+                            corrected_result = verifier_event
+                    if corrected_result is not None:
+                        step_response = corrected_result
+
+                step_results.append(step_response)
+                should_verify_step2 = loop_mode and step_index == 1 and hallucination_step2
+                should_verify_step3 = loop_mode and step_index == 2 and hallucination_step3
+                if should_verify_step2 or should_verify_step3:
+                    corrected_result = None
+                    async for event_type, verifier_event in run_verifier(step_response, logical_step, step_index):
+                        if event_type == "sse":
+                            yield verifier_event
+                        elif event_type == "result":
+                            corrected_result = verifier_event
+                    if corrected_result is not None:
+                        step_results[-1] = corrected_result
+                if loop_mode and step_index < total_steps - 1:
+                    # STEP 완료 이벤트 — 프론트에서 현재 streamingContent를 messages에 flush
+                    yield f"data: {json.dumps({'step_done': True, 'step_index': step_index})}\n\n"
+                    separator = "\n\n"
+                    response_parts.append(separator)
+                    yield f"data: {json.dumps({'token': separator})}\n\n"
+                del step_response_parts, step_response
 
         full_response = "".join(response_parts)
         if full_response.strip():

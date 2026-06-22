@@ -17,10 +17,13 @@ CLAUDE_SYSTEM_PROMPT = """당신은 LTE/EPC 네트워크 장애 분석 결과의
 - 입력 데이터에 없는 값을 생성하거나 추론한 주장은 제거하거나 "추가 확인 필요"로 완화합니다.
 - 3GPP 절차 상 틀린 해석이 있으면 올바르게 수정합니다.
 - Interface / Message / Cause 이름은 변경하지 않습니다.
+- 새로운 원인, 새로운 장애 시나리오, 새로운 RCA, 새로운 그룹, 새로운 도메인 판단을 생성하지 않습니다.
+- 입력 결과의 구조를 유지하며 검증 및 보정만 수행합니다.
 - 반드시 한국어로 작성합니다.
 - 원문의 구조(문단 순서, 항목 분류)를 최대한 유지하면서 보정합니다.
 - 보정한 항목은 문장 뒤에 [보정됨] 태그를 붙입니다.
 - 보정 없이 유지한 항목은 그대로 출력합니다.
+- 변경 이유 설명, 검토 과정, 메타 코멘트는 출력하지 않습니다.
 """
 
 
@@ -69,14 +72,14 @@ async def verify_and_correct_step(
     except Exception as exc:
         raise ClaudeVerifierError("anthropic 패키지를 불러올 수 없습니다") from exc
 
-    client = AsyncAnthropic(api_key=api_key, timeout=120.0)
+    client = AsyncAnthropic(api_key=api_key, timeout=60.0)
     user_prompt = _build_user_prompt(compact_rca_ir, step_result, step_label)
     emitted = False
 
     try:
         async with client.messages.stream(
             model=CLAUDE_VERIFIER_MODEL,
-            max_tokens=4096,
+            max_tokens=1200,
             system=CLAUDE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         ) as stream:

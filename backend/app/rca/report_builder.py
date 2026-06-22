@@ -821,14 +821,20 @@ QUALITY_STEP_SYSTEM_PROMPT = """\
 """
 
 STEP2A_ENRICHMENT_TEMPLATE = """\
-STEP 2-A: 최소 관찰 실험
+STEP 2-A: 관찰 결과 요약
 
 역할:
-- [STEP2 결과], [STEP3 Ranking], [최소 통계]를 사용해 관찰 결과를 요약한다.
-- [STEP3 Ranking]은 가장 높은 비중 패턴 판단에만 사용한다.
-- [최소 통계]는 분산/집중 여부 판단에만 사용한다.
+[STEP2 결과], [STEP3 Ranking], [최소 통계]를 참고하여 관찰 결과를 짧게 요약한다.
 
-한국어로 작성한다.
+작성 기준:
+- STEP3 Ranking의 1위 항목을 가장 높은 비중 패턴으로 사용한다.
+- mme_distribution 값이 비슷하면 MME는 분산된 것으로 표현한다.
+- eNB 정보가 없으면 eNB 분산 여부는 확인 불가로 표현한다.
+- Attach_MO 실패율은 숫자 그대로 인용한다.
+- Failure Chain 또는 동일 Flow가 있으면 반복 출현 패턴이 있다고 표현한다.
+
+출력:
+관찰 결과를 5개 항목 내외의 한국어 문장으로 작성한다.
 
 [STEP2 관찰 그룹]
 {step2_result}
@@ -838,17 +844,6 @@ STEP 2-A: 최소 관찰 실험
 
 [최소 통계]
 {minimal_stats}
-
-아래 형식으로만 답하라.
-
-관찰 결과
-- 가장 높은 비중 패턴은 <패턴명>으로 관찰되었다.
-- MME 분산 여부:
-- eNB 분산 여부:
-- Attach_MO 집중 여부:
-- 반복 출현 패턴 여부:
-
-위 5줄에 해당하는 내용만 출력하라.
 """
 
 STEP3A_RCA_TEMPLATE = """\

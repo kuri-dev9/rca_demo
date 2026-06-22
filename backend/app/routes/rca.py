@@ -57,7 +57,9 @@ logger = logging.getLogger(__name__)
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 300.0
-DEFAULT_NUM_PREDICT = 1024
+QUALITY_BASE_NUM_PREDICT = 1024
+STEP2A_NUM_PREDICT_MULTIPLIER = 3
+STEP3A_NUM_PREDICT_MULTIPLIER = 4
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -69,10 +71,10 @@ _SAMPLE_FILE_CANDIDATES = [
 
 
 def build_quality_options(*, think: bool, multiplier: int = 1) -> dict[str, Any]:
-    options: dict[str, Any] = {"num_predict": DEFAULT_NUM_PREDICT}
+    options: dict[str, Any] = {"num_predict": QUALITY_BASE_NUM_PREDICT}
     if think:
         options.update({
-            "num_predict": DEFAULT_NUM_PREDICT * multiplier,
+            "num_predict": QUALITY_BASE_NUM_PREDICT * multiplier,
             "temperature": 1.0,
             "top_p": 0.95,
             "top_k": 64,
@@ -82,7 +84,7 @@ def build_quality_options(*, think: bool, multiplier: int = 1) -> dict[str, Any]
 
 def build_core_options() -> dict[str, Any]:
     return {
-        "num_predict": DEFAULT_NUM_PREDICT,
+        "num_predict": QUALITY_BASE_NUM_PREDICT,
         "repeat_penalty": 1.3,
         "repeat_last_n": 256,
     }
@@ -413,14 +415,14 @@ async def stream_rca_reasoning(
 
             if step_index == 1:
                 verifier_step_label = "STEP 2-A Observation Enrichment"
-                quality_multiplier = 3
+                quality_multiplier = STEP2A_NUM_PREDICT_MULTIPLIER
                 verifier_messages = build_local_step2_enrichment_messages(
                     compact_rca_ir,
                     step_response,
                 )
             else:
                 verifier_step_label = "STEP 3-A RCA 추론"
-                quality_multiplier = 4
+                quality_multiplier = STEP3A_NUM_PREDICT_MULTIPLIER
                 verifier_messages = build_local_step3_rca_messages(
                     compact_rca_ir,
                     step2a_result or (step_results[1] if len(step_results) > 1 else ""),
@@ -434,7 +436,7 @@ async def stream_rca_reasoning(
             verifier_payload = {
                 "model": conv.model or RCA_MODEL,
                 "messages": verifier_messages,
-                "stream": False,
+                "stream": True,
                 "think": True,
                 "options": build_quality_options(think=True, multiplier=quality_multiplier),
             }
@@ -456,47 +458,87 @@ async def stream_rca_reasoning(
             content_length = 0
             thinking_length = 0
             raw_size = 0
+            eval_count = None
+            total_duration = None
+
+            async def read_quality_stream() -> tuple[str, dict[str, Any], str, str]:
+                content_parts: list[str] = []
+                thinking_parts: list[str] = []
+                chunks: list[dict[str, Any]] = []
+                final_chunk: dict[str, Any] = {}
+
+                async with client.stream(
+                    "POST",
+                    f"{settings.ollama_base_url}/api/chat",
+                    json=verifier_payload,
+                ) as verifier_response:
+                    verifier_response.raise_for_status()
+                    async for line in verifier_response.aiter_lines():
+                        if not line:
+                            continue
+                        chunk = json.loads(line)
+                        chunks.append(chunk)
+                        message = chunk.get("message", {})
+                        if isinstance(message, dict):
+                            content = message.get("content") or ""
+                            thinking = message.get("thinking") or ""
+                        else:
+                            content = ""
+                            thinking = ""
+                        content = content or chunk.get("response") or chunk.get("content") or ""
+                        thinking = thinking or chunk.get("thinking") or ""
+                        if content:
+                            content_parts.append(content)
+                        if thinking:
+                            thinking_parts.append(thinking)
+                        if chunk.get("done"):
+                            final_chunk = chunk
+                            break
+
+                stream_payload = {
+                    "chunks": chunks,
+                    "final": final_chunk,
+                    "content": "".join(content_parts),
+                    "thinking": "".join(thinking_parts),
+                }
+                return (
+                    stream_payload["content"],
+                    final_chunk or (chunks[-1] if chunks else {}),
+                    stream_payload["thinking"],
+                    json.dumps(stream_payload, ensure_ascii=False),
+                )
+
             try:
-                verifier_response = await asyncio.wait_for(
-                    client.post(
-                        f"{settings.ollama_base_url}/api/chat",
-                        json=verifier_payload,
-                    ),
+                corrected_result, payload, thinking, raw_payload = await asyncio.wait_for(
+                    read_quality_stream(),
                     timeout=QUALITY_STEP_TIMEOUT_SEC,
                 )
-                verifier_response.raise_for_status()
-                payload = verifier_response.json()
-                raw_payload = json.dumps(payload, ensure_ascii=False)
                 raw_size = len(raw_payload)
                 logger.warning("[QUALITY_RAW_RESPONSE] %s", raw_payload[:5000])
-                message = payload.get("message", {})
-                corrected_result = (
-                    message.get("content") if isinstance(message, dict) else None
-                    or payload.get("response")
-                    or payload.get("content")
-                    or ""
-                )
-                thinking = (
-                    message.get("thinking") if isinstance(message, dict) else None
-                ) or payload.get("thinking") or ""
                 done_reason = payload.get("done_reason")
+                eval_count = payload.get("eval_count")
+                total_duration = payload.get("total_duration")
                 content_length = len(corrected_result)
                 thinking_length = len(thinking)
                 logger.warning(
-                    "[QUALITY_RESPONSE] step=%s done_reason=%s content_length=%s thinking_length=%s",
+                    "[QUALITY_RESPONSE] step=%s thinking_length=%s content_length=%s done_reason=%s eval_count=%s total_duration=%s",
                     verifier_step_label,
-                    done_reason,
-                    content_length,
                     thinking_length,
+                    content_length,
+                    done_reason,
+                    eval_count,
+                    total_duration,
                 )
                 if not corrected_result.strip():
                     logger.warning(
-                        "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s done_reason=%s content_length=%s thinking_length=%s raw_size=%s payload=%s",
+                        "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s done_reason=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s raw_size=%s payload=%s",
                         list(payload.keys()),
-                        list(message.keys()) if isinstance(message, dict) else None,
+                        list(payload.get("message", {}).keys()) if isinstance(payload.get("message"), dict) else None,
                         done_reason,
                         content_length,
                         thinking_length,
+                        eval_count,
+                        total_duration,
                         raw_size,
                         raw_payload[:2000],
                     )
@@ -507,13 +549,15 @@ async def stream_rca_reasoning(
                 if payload is not None and raw_size == 0:
                     raw_size = len(json.dumps(payload, ensure_ascii=False))
                 logger.warning(
-                    "%s optional quality step skipped: %s: %s done_reason=%s content_length=%s thinking_length=%s raw_size=%s",
+                    "%s optional quality step skipped: %s: %s done_reason=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s raw_size=%s",
                     verifier_step_label,
                     exc_type,
                     exc_msg,
                     done_reason,
                     content_length,
                     thinking_length,
+                    eval_count,
+                    total_duration,
                     raw_size,
                     exc_info=True,
                 )

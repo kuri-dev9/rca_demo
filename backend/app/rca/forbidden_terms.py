@@ -20,8 +20,6 @@ GLOBAL_FORBIDDEN_TERMS: list[str] = [
     "Cell_Reselection",
     "PDP context",
     "Create Session Response",
-    "PGW",
-    "PCRF",
     "프로비저닝",
     "Provisioning",
     "부하",
@@ -54,6 +52,14 @@ UE_DEVICE_FORBIDDEN_TERMS: list[str] = [
     "단말 인증 실패",
     "단말 재선택 문제",
     "사용자 단말 상태",
+    "Subscriber 원인",
+    "Subscriber 원인 확정",
+    "UE 원인",
+    "UE 원인 확정",
+    "USIM 원인",
+    "USIM 원인 확정",
+    "가입자 원인 확정",
+    "단말 원인 확정",
 ]
 GLOBAL_FORBIDDEN_TERMS.extend(UE_DEVICE_FORBIDDEN_TERMS)
 
@@ -85,7 +91,6 @@ STEP3_FORBIDDEN_TERMS: list[str] = [
 STEP4_FORBIDDEN_TERMS: list[str] = [
     "HSS 부하분산",
     "HSS 이중화",
-    "PCRF",
     "GUTI 매칭 실패",
     "AV 제공 지연",
     "GTP-U 경로 점검",
@@ -93,7 +98,6 @@ STEP4_FORBIDDEN_TERMS: list[str] = [
     "KPI 대시보드 구축",
     "CPU/Memory 부하 점검",
     "Congestion 점검",
-    "특정 핵심 노드(MME)를 중심으로",
     "인증 서버 가용성 증대",
     "중앙 데이터베이스",
     "인터페이스 신뢰도 문제",

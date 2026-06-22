@@ -447,27 +447,8 @@ async def stream_rca_reasoning(
             quality_options = verifier_payload["options"]
             system_prompt = verifier_messages[0].get("content", "") if verifier_messages else ""
             user_prompt = verifier_messages[-1].get("content", "") if verifier_messages else ""
-            request_path = (
-                "/tmp/rca_quality_step2a_request.json"
-                if step_index == 1
-                else "/tmp/rca_quality_step3a_request.json"
-            )
-            try:
-                Path(request_path).write_text(
-                    json.dumps(verifier_payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[QUALITY_REQUEST_DUMP_FAILED] step=%s path=%s exc=%s: %s",
-                    verifier_step_label,
-                    request_path,
-                    type(exc).__name__,
-                    exc,
-                    exc_info=True,
-                )
             logger.warning(
-                "[QUALITY_REQUEST] step=%s ollama_base_url=%s model=%s stream=%s think=%s options=%s timeout=%s messages=%s system_length=%s user_length=%s request_path=%s user_head=%s user_tail=%s",
+                "[QUALITY_REQUEST] step=%s ollama_base_url=%s model=%s stream=%s think=%s options=%s timeout=%s messages=%s system_length=%s user_length=%s user_head=%s user_tail=%s",
                 verifier_step_label,
                 settings.ollama_base_url,
                 verifier_payload["model"],
@@ -478,7 +459,6 @@ async def stream_rca_reasoning(
                 len(verifier_messages),
                 len(system_prompt),
                 len(user_prompt),
-                request_path,
                 user_prompt[:500],
                 user_prompt[-500:],
             )

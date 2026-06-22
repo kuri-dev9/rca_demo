@@ -40,6 +40,7 @@ from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
+    build_local_step2_enrichment_messages,
     build_local_step3_rca_messages,
     build_rca_messages,
     build_report_prompt_from_reasoning,
@@ -370,24 +371,32 @@ async def stream_rca_reasoning(
     async def generate():
         response_parts: list[str] = []
         step_results: list[str] = []
+        step2_enrichment_result = ""
 
-        async def run_step3a_quality_step(
+        async def run_optional_quality_step(
             client: httpx.AsyncClient,
             step_response: str,
             step_label: str,
             step_index: int,
+            step2a_result: str = "",
         ) -> Any:
-            if not loop_mode or step_index != 2:
+            if not loop_mode or step_index not in (1, 2):
                 yield ("result", step_response)
                 return
 
-            verifier_step_label = "STEP 3-A Observation Enrichment + RCA 추론"
-            verifier_messages = build_local_step3_rca_messages(
-                compact_rca_ir,
-                step_results[0] if step_results else "",
-                step_results[1] if len(step_results) > 1 else "",
-                step_response,
-            )
+            if step_index == 1:
+                verifier_step_label = "STEP 2-A Observation Enrichment"
+                verifier_messages = build_local_step2_enrichment_messages(
+                    compact_rca_ir,
+                    step_response,
+                )
+            else:
+                verifier_step_label = "STEP 3-A RCA 추론"
+                verifier_messages = build_local_step3_rca_messages(
+                    compact_rca_ir,
+                    step2a_result or (step_results[1] if len(step_results) > 1 else ""),
+                    step_response,
+                )
 
             header = f"\n\n---\n**[{verifier_step_label} 실행 중...]**\n\n"
             response_parts.append(header)
@@ -615,14 +624,42 @@ async def stream_rca_reasoning(
                             step_response = retried_response
                         del retry_parts, retried_response
 
-                should_run_step3a_quality_step = loop_mode and step_index == 2
-                if should_run_step3a_quality_step:
-                    corrected_result = None
-                    async for event_type, verifier_event in run_step3a_quality_step(
+                if loop_mode and step_index == 1:
+                    enriched_result = None
+                    async for event_type, verifier_event in run_optional_quality_step(
                         client,
                         step_response,
                         logical_step,
                         step_index,
+                    ):
+                        if event_type == "sse":
+                            yield verifier_event
+                        elif event_type == "result":
+                            enriched_result = verifier_event
+                    step2_enrichment_result = enriched_result or step_response
+
+                    if hallucination_step2:
+                        verified_enrichment = None
+                        async for event_type, verifier_event in run_verifier(
+                            step2_enrichment_result,
+                            "STEP 2-A",
+                            step_index,
+                        ):
+                            if event_type == "sse":
+                                yield verifier_event
+                            elif event_type == "result":
+                                verified_enrichment = verifier_event
+                        if verified_enrichment is not None:
+                            step2_enrichment_result = verified_enrichment
+
+                if loop_mode and step_index == 2:
+                    corrected_result = None
+                    async for event_type, verifier_event in run_optional_quality_step(
+                        client,
+                        step_response,
+                        logical_step,
+                        step_index,
+                        step2_enrichment_result,
                     ):
                         if event_type == "sse":
                             yield verifier_event
@@ -632,9 +669,8 @@ async def stream_rca_reasoning(
                         step_response = corrected_result
 
                 step_results.append(step_response)
-                should_verify_step2 = loop_mode and step_index == 1 and hallucination_step2
                 should_verify_step3 = loop_mode and step_index == 2 and hallucination_step3
-                if should_verify_step2 or should_verify_step3:
+                if should_verify_step3:
                     corrected_result = None
                     async for event_type, verifier_event in run_verifier(step_response, logical_step, step_index):
                         if event_type == "sse":

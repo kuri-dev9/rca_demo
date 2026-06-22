@@ -752,20 +752,16 @@ entity_id, 조치 방향은 작성하지 않는다.
 STEP3_TEMPLATE = """\
 STEP 3: 패턴 우선순위 분석 (Fact Ranking)
 
-[STEP2 결과]와 [입력 통계]만 사용해 관찰된 패턴을 영향도 순으로 정렬한다.
+[원본 관찰 데이터]와 [입력 통계]만 사용해 관찰된 패턴을 영향도 순으로 정렬한다.
 
 출력 형식:
 Top Pattern Ranking
 Pattern #1
-Call Type: <call_type>
 Interface: <interface>
 Message: <message>
 Cause: <cause>
 Count: <count>
-IMSI: <count>
-MME: <count>
-eNB: <count>
-Error Chain: <입력에 있으면 작성, 없으면 "확인 필요">
+Failure Share: <pct>%
 
 Pattern #2
 ...
@@ -780,8 +776,8 @@ Pattern #2
 RCA 수행, 장애 원인 추론, 설정 오류 추론, 프로파일 추론, 정책 추론은 하지 않는다.
 새 데이터·수치·노드·에러·Cause를 만들지 않는다.
 
-[STEP2 관찰 결과]
-{step2_result}
+[원본 관찰 데이터]
+{observation_payload}
 
 [입력 통계]
 {stats_payload}
@@ -827,20 +823,84 @@ QUALITY_STEP_SYSTEM_PROMPT = """\
 응답은 한국어로 간결하게 작성한다.
 """
 
-STEP3A_RCA_TEMPLATE = """\
-STEP 3-A: Observation Enrichment + RCA 추론
+STEP2A_ENRICHMENT_TEMPLATE = """\
+STEP 2-A: Observation Enrichment
 
 역할:
-- STEP1, STEP2, STEP3 결과를 이용해 상위 패턴 관찰을 강화하고 RCA 후보를 도출한다.
-- 영향 범위, 분산도, 집중도, 공통 특성을 분석한다.
-- 입력에 없는 패턴/에러/Cause/장비/수치를 만들지 않는다.
+- 원본 통계 데이터를 RCA에 적합한 관찰 정보로 압축한다.
+- [입력 관찰 데이터]에 있는 Fact만 사용한다.
+- RCA 후보, 원인 추론, 도메인 판단은 출력하지 않는다.
 
 허용:
-- Observation Enrichment
+- Count 정리
+- Failure Share 계산
+- IMSI 영향 범위 정리
+- MME 영향 범위 정리
+- eNB 영향 범위 정리
+- Error Chain 정리
+- 상위 패턴 정리
+- 집중도 정리
+- 분산도 정리
+
+금지:
+- RCA 수행
+- 원인 추론
+- 도메인 판단
+- 설정 오류 추론
+- 가입자 원인 판단
+- UE 원인 판단
+- USIM 원인 판단
+- 입력 데이터에 없는 패턴/에러/Cause/Error Chain 생성
+
+출력 형식:
+관찰 패턴
+
+Pattern #1
+Interface:
+Message:
+Cause:
+
+Count:
+Failure Share:
+
+Affected IMSI:
+Affected MME:
+Affected eNB:
+
+Error Chain:
+
+Pattern #2
+...
+
+Pattern #3
+...
+
+관찰 요약
+- 가장 높은 비중 패턴:
+- 상위 3개 패턴 비중 합계:
+- MME 집중 여부:
+- eNB 집중 여부:
+- 특정 절차 집중 여부:
+- Core 후보 패턴 비율:
+- RAN 후보 패턴 비율:
+
+[STEP2 관찰 그룹]
+{step2_result}
+
+[입력 관찰 데이터]
+{observation_payload}
+"""
+
+STEP3A_RCA_TEMPLATE = """\
+STEP 3-A: RCA 추론
+
+역할:
+- STEP2-A Observation Enrichment 결과와 STEP3 Fact Ranking, 핵심 통계만 해석해 RCA 후보를 도출한다.
+- STEP1/STEP2 전체 내용을 요구하거나 재구성하지 않는다.
+- 입력에 없는 Interface/Message/Cause/Error Chain을 만들지 않는다.
+
+허용:
 - RCA 추론
-- 영향 범위 분석
-- 분산도 분석
-- 집중도 분석
 - 공통 특성 분석
 - 도메인 후보 제시
 - 우선순위 선정
@@ -856,40 +916,39 @@ STEP 3-A: Observation Enrichment + RCA 추론
 - 단말/UE/USIM 자체 원인 확정
 
 출력:
-관찰
-Pattern #1
-<interface> / <message> / <cause>
-Count: <count>
-Failure Share: <pct>%
-IMSI: <count>
-MME: <count>
-eNB: <count>
-Error Chain: <입력에 있으면 작성, 없으면 "확인 필요">
-
 관찰 결과
-- <집중도/분산도/공통 특성>
+- 상위 패턴 공통 특성:
+- 분산도 분석:
+- 집중도 분석:
 
 RCA 후보
-1순위 <domain> — <근거>
-2순위 <domain> — <근거>
-3순위 <domain> — <근거>
+1순위
+도메인:
+근거:
+추가 확인 필요:
 
-추가 확인 필요 항목
-- <항목>
+2순위
+도메인:
+근거:
+추가 확인 필요:
 
-[STEP1 결과]
-{step1_result}
+3순위
+도메인:
+근거:
+추가 확인 필요:
 
-[STEP2 관찰 그룹]
-{step2_result}
+최종 판단
+가장 가능성 높은 도메인:
+판단 근거:
+판단 한계:
+
+[STEP2-A Observation Enrichment 결과]
+{step2a_result}
 
 [STEP3 Fact Ranking]
 {step3_result}
 
-[입력 관찰 데이터]
-{observation_payload}
-
-[입력 통계]
+[핵심 통계]
 {stats_payload}
 """
 
@@ -905,6 +964,7 @@ def build_loop_step_messages(
     allowed_list: str = "",
     flow_payload: str = "",
     stats_payload: str = "",
+    observation_payload: str = "",
 ) -> list[dict[str, str]]:
     template = LOOP_STEP_TEMPLATES[step_name]
 
@@ -918,6 +978,7 @@ def build_loop_step_messages(
             step1_result=step1_result,
             step2_result=step2_result,
             stats_payload=stats_payload,
+            observation_payload=observation_payload,
         )
     elif step_name == "step4":
         user_content = template.format(
@@ -997,11 +1058,10 @@ def build_loop_step3_messages(
     step1_result: str,
     step2_result: str,
 ) -> list[dict[str, str]]:
-    """STEP3 입력: STEP1+STEP2 결과 + 영향도 산정용 통계."""
+    """STEP3 입력: 원본 관찰 데이터 + 핵심 통계. RCA 추론은 하지 않는다."""
     return build_loop_step_messages(
         "step3",
-        step1_result=step1_result,
-        step2_result=step2_result,
+        observation_payload=_observation_enrichment_payload(compact_rca_ir),
         stats_payload=_step3_stats_payload(compact_rca_ir),
     )
 
@@ -1012,7 +1072,6 @@ def _step3_stats_payload(compact_rca_ir: dict[str, Any]) -> str:
     entity = _get_data(compact_rca_ir, "entity_failure_contribution", {})
 
     pattern_counts = hints.get("pattern_counts", {}) if hints else {}
-    critical_enb = hints.get("concentration", {}).get("critical_enb", []) if hints else []
     top_mme = entity.get("top_mme", []) if entity else []
     mme_distribution = [
         {"mme_label": f"MME-{idx + 1}", "failure_contribution_pct": e.get("failure_contribution_pct", 0)}
@@ -1021,8 +1080,8 @@ def _step3_stats_payload(compact_rca_ir: dict[str, Any]) -> str:
 
     stats_payload = {
         "failure_rate": stats.get("failure_rate", 0),
+        "core_candidate_pct": pattern_counts.get("core_candidate_pct", 0),
         "ran_candidate_pct": pattern_counts.get("ran_candidate_pct", 0),
-        "critical_enb_count": len(critical_enb),
         "mme_failure_distribution": mme_distribution,
         "high_failure_rate_procedures": hints.get("high_failure_rate_procedures", {}) if hints else {},
     }
@@ -1033,6 +1092,8 @@ def _observation_enrichment_payload(compact_rca_ir: dict[str, Any]) -> str:
     shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
     error_chains = _get_data(compact_rca_ir, "error_chains", [])
     stats = _get_data(compact_rca_ir, "statistics", {})
+    hints = _get_data(compact_rca_ir, "rca_hints", {})
+    pattern_counts = hints.get("pattern_counts", {}) if hints else {}
     failure_count = _num(stats.get("failure_count"))
 
     patterns: list[dict[str, Any]] = []
@@ -1053,27 +1114,44 @@ def _observation_enrichment_payload(compact_rca_ir: dict[str, Any]) -> str:
     payload = {
         "failure_count": int(failure_count),
         "patterns": patterns,
+        "candidate_pattern_summary": {
+            "core_candidate_pct": pattern_counts.get("core_candidate_pct", 0),
+            "ran_candidate_pct": pattern_counts.get("ran_candidate_pct", 0),
+        },
         "flow_summary": _format_flow_payload_for_step2(error_chains),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_local_step3_rca_messages(
+def build_local_step2_enrichment_messages(
     compact_rca_ir: dict[str, Any],
-    step1_result: str,
     step2_result: str,
-    step3_result: str,
 ) -> list[dict[str, str]]:
     observation_payload = _observation_enrichment_payload(compact_rca_ir)
     return [
         {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
         {
             "role": "user",
-            "content": STEP3A_RCA_TEMPLATE.format(
-                step1_result=step1_result[:3000],
-                step2_result=step2_result[:4000],
-                step3_result=step3_result[:4000],
+            "content": STEP2A_ENRICHMENT_TEMPLATE.format(
+                step2_result=step2_result[:3000],
                 observation_payload=observation_payload[:5000],
+            ),
+        },
+    ]
+
+
+def build_local_step3_rca_messages(
+    compact_rca_ir: dict[str, Any],
+    step2a_result: str,
+    step3_result: str,
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": STEP3A_RCA_TEMPLATE.format(
+                step2a_result=step2a_result[:4000],
+                step3_result=step3_result[:4000],
                 stats_payload=_step3_stats_payload(compact_rca_ir),
             ),
         },

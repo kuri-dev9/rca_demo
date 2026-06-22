@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
-QUALITY_STEP_TIMEOUT_SEC = 30.0
+QUALITY_STEP_TIMEOUT_SEC = 300.0
 QUALITY_STEP_MAX_TOKENS = 512
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
@@ -430,8 +430,23 @@ async def stream_rca_reasoning(
                 if not corrected_result.strip():
                     raise ValueError("Verifier 응답이 비어 있습니다")
             except Exception as exc:
-                logger.warning("%s optional verifier skipped: %s", verifier_step_label, exc, exc_info=True)
-                warning_text = f"{verifier_step_label} 실패/Timeout, {step_label} 결과 사용"
+                exc_type = type(exc).__name__
+                exc_msg = str(exc)
+                logger.warning(
+                    "%s optional quality step skipped: %s: %s",
+                    verifier_step_label,
+                    exc_type,
+                    exc_msg,
+                    exc_info=True,
+                )
+                if isinstance(exc, asyncio.TimeoutError):
+                    warning_text = (
+                        f"{verifier_step_label} Timeout({QUALITY_STEP_TIMEOUT_SEC}s), "
+                        f"{step_label} 결과 사용"
+                    )
+                else:
+                    detail = f"{exc_type}: {exc_msg}"[:300]
+                    warning_text = f"{verifier_step_label} 실패({detail}), {step_label} 결과 사용"
                 response_parts.append(f"\n\n*({warning_text})*\n\n")
                 yield ("sse", f"data: {json.dumps({'warning': warning_text})}\n\n")
                 yield ("result", step_response)

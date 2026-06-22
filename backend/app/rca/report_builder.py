@@ -711,21 +711,19 @@ STEP_SYSTEM_PROMPT = """\
 
 
 STEP1_TEMPLATE = """\
-STEP 1: 의미 해석
+STEP 1: 데이터 정규화
 
-[입력 통계]의 error_stats 항목마다 정확히 아래 3줄만 작성한다:
-에러: <interface> / <message> / <cause>
-구간: <3GPP 노드 간 구간>
-의미: <3GPP 절차상 Cause 발생 의미, 1문장>
+[입력 통계]의 error_stats 항목마다 아래 항목만 정리한다:
+Interface:
+Message:
+Stage:
+Cause:
+구간:
 
-STEP1은 3GPP 의미 설명까지만 수행한다.
-원인 판단, 도메인 판단, 가입자 판단, 단말 판단은 하지 않는다.
-아래 Cause는 가입자/단말 원인으로 단정하지 않고 Cause 발생 의미만 설명한다:
-- PLMN_not_allowed
-- Requested_service_option_not_subscribed
-- Operator_Determined_Barring
-- Synch_failure
-- Implicitly_detached
+STEP1은 정규화기 역할만 수행한다.
+Message/Cause는 입력 데이터에 있는 이름을 그대로 사용한다.
+구간은 Interface 기준 Node Pair만 간단히 작성한다.
+HSS 프로파일 확인, 가입자 문제, 셀 가용성 문제, Subscription 문제, 네트워크 장애 추정, 도메인 분류, 원인 추정, 조치 권고는 작성하지 않는다.
 
 항목 사이는 빈 줄로 구분하고, error_stats 항목 수만큼만 작성한 뒤 종료한다.
 같은 문장을 반복하지 않는다. entity_id, 조치 방향, 상관관계 분석은 작성하지 않는다.
@@ -738,15 +736,15 @@ STEP2_TEMPLATE = """\
 STEP 2: 관찰된 패턴 구조화
 
 [STEP1 결과]와 [입력 Flow 데이터]만 사용해 아래만 판단한다:
-- 동일 Flow 여부 / 독립 이벤트 여부 / 동일 Domain 여부 / Failure Chain 연결 여부
+- 동일 Flow 여부 / 독립 이벤트 여부 / Failure Chain 연결 여부
 
-판단 결과를 아래 3그룹으로 정리한다:
+판단 결과를 아래 항목으로만 정리한다:
 1. 연관 그룹 — [입력 Flow 데이터]에 있는 동일 Flow/Failure Chain으로 연결된 패턴
 2. 독립 그룹 — 단독으로 발생하는 패턴
-3. 도메인 후보 그룹 — Subscriber/HSS, Core/EPC, RAN/Access, Transport/Interface, Unknown 중 택1
+3. Failure Chain — [입력 Flow 데이터]의 first_error → last_error 흐름
 
 [입력 Flow 데이터]에 없는 관계는 만들지 않는다.
-RCA 수행, 장애 원인 판단, 설정 오류 판단, 프로파일 불일치 판단은 하지 않는다.
+RCA 수행, 도메인 후보 생성, 장애 원인 판단, 설정 오류 판단, 프로파일 불일치 판단은 하지 않는다.
 entity_id, 조치 방향은 작성하지 않는다.
 
 [STEP1 결과]
@@ -759,9 +757,11 @@ entity_id, 조치 방향은 작성하지 않는다.
 STEP3_TEMPLATE = """\
 STEP 3: 패턴 우선순위 분석 (Fact Ranking)
 
-아래 JSON만 출력한다. 설명 문장, markdown, 코드블록은 쓰지 않는다.
+아래 Markdown 형식으로 Pattern Ranking만 출력한다.
 
-{{"ranking":[{{"rank":1,"pattern":"<message>/<cause>","count":<count>}}]}}
+## Pattern Ranking
+
+1. <message> / <cause> (<count>)
 
 평가 기준:
 1. Count
@@ -783,16 +783,28 @@ RCA 수행, 장애 원인 추론, 설정 오류 추론, 프로파일 추론, 정
 STEP4_TEMPLATE = """\
 STEP 4: 최종 RCA 보고서
 
-[STEP3-A RCA 추론 결과 또는 STEP3 Fact Ranking]을 [실제 장비 데이터]에 매핑해 아래 순서로만 작성한다.
-STEP4는 RCA 수행 단계가 아니며, 새로운 원인/도메인/장애 시나리오를 만들지 않는다.
+[STEP3-A RCA 추론 결과 또는 STEP3 Fact Ranking]을 [실제 장비 데이터]에 매핑해 Markdown 보고서로 작성한다.
+STEP4는 RCA 수행 단계가 아니며, STEP3-A 결과를 정리하는 단계다.
 
-1. 요약 — 전체 실패율, 주요 실패 절차, 주요 관찰 패턴
-2. 근거 — [실제 장비 데이터]/[STEP3-A 또는 STEP3 결과]에 있는 내용만 bullet(•)
-3. RCA 판단 — [STEP3-A 결과]의 원인 후보/도메인 후보가 있으면 그대로 인용.
-   STEP3-A가 없고 STEP3 ranking만 있으면 "RCA 추론 단계 미완료, 관찰 패턴 기준 보고"라고 작성한다.
-4. 조치 권고 — [허용 장비 및 인터페이스 목록]에 있는 항목만,
-   "<interface> / <message> / <cause> 대상의 <점검 내용>" 형식
-   (예: S6a_Diameter / AIR_AIA / Unassigned 대상 IMSI의 HSS 가입자 프로파일 확인)
+아래 구조를 사용한다:
+
+## RCA 요약
+
+## 주요 관찰
+- ...
+
+## RCA 후보
+### 1순위
+근거:
+
+### 2순위
+근거:
+
+### 3순위
+근거:
+
+## 조치 권고
+- ...
 
 [STEP3-A 또는 STEP3 결과]나 입력 데이터에 없는 원인·수치·장비·인터페이스·절차·조치를 만들지 않는다.
 실패율은 [실제 장비 데이터]의 failure_rate_display 값을 그대로 인용하고, 소수 값을 다시 퍼센트로 변환하지 않는다.
@@ -861,16 +873,11 @@ STEP 3-A: RCA 후보 정리
 - Rank와 Count는 참고 정보로만 사용하고, RCA 후보 근거는 관찰 결과와 분산/집중 특성을 중심으로 작성한다.
 - 최소 통계는 분산 여부 및 영향 범위 판단에 사용한다.
 - 입력 데이터에 있는 패턴, 에러, Cause, 장비, 수치를 기준으로 작성한다.
-- 각 RCA 후보는 Failure Chain, 반복 출현 패턴, MME 분산 정보, Attach_MO 집중 정보, Core/RAN 분포 정보, STEP2-A 관찰 결과 중 최소 1개 이상을 근거로 작성한다.
+- 각 RCA 후보는 STEP2-A에 포함된 Failure Chain, 반복 출현 패턴, MME 분산 정보, Attach_MO 특성, Core/RAN 분포, Ranking 정보 중 최소 1개 이상을 근거로 작성한다.
+- 패턴 간 연관성과 Failure Chain 흐름을 RCA 후보 근거에 반영한다.
 - 한국어로 작성한다.
 
 출력:
-관찰 결과
-- MME 분산 여부:
-- eNB 분산 여부:
-- Attach_MO 집중 여부:
-- Core/RAN 집중 여부:
-
 RCA 후보
 1순위
 근거:
@@ -1122,15 +1129,17 @@ def _format_fact_ranking_text(step3_result: str) -> str:
     if not isinstance(ranking, list):
         return step3_result
 
-    lines = []
+    lines = ["## Pattern Ranking", ""]
+    has_rows = False
     for row in ranking:
         if not isinstance(row, dict):
             continue
         rank = row.get("rank", "-")
         pattern = row.get("pattern", "-")
         count = row.get("count", "-")
-        lines.append(f"{rank}위 {pattern} ({count})")
-    return "\n".join(lines) if lines else step3_result
+        lines.append(f"{rank}. {pattern.replace('/', ' / ')} ({count})")
+        has_rows = True
+    return "\n".join(lines) if has_rows else step3_result
 
 
 def build_fact_ranking_text(step3_result: str) -> str:

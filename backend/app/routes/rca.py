@@ -13,6 +13,7 @@ import logging
 import os
 import resource
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -439,20 +440,47 @@ async def stream_rca_reasoning(
             verifier_payload = {
                 "model": conv.model or RCA_MODEL,
                 "messages": verifier_messages,
-                "stream": False,
+                "stream": True,
                 "think": True,
                 "options": build_quality_options(think=True, multiplier=quality_multiplier),
             }
             quality_options = verifier_payload["options"]
+            system_prompt = verifier_messages[0].get("content", "") if verifier_messages else ""
+            user_prompt = verifier_messages[-1].get("content", "") if verifier_messages else ""
+            request_path = (
+                "/tmp/rca_quality_step2a_request.json"
+                if step_index == 1
+                else "/tmp/rca_quality_step3a_request.json"
+            )
+            try:
+                Path(request_path).write_text(
+                    json.dumps(verifier_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[QUALITY_REQUEST_DUMP_FAILED] step=%s path=%s exc=%s: %s",
+                    verifier_step_label,
+                    request_path,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
             logger.warning(
-                "[QUALITY_REQUEST] step=%s model=%s think=%s num_predict=%s temperature=%s top_p=%s top_k=%s",
+                "[QUALITY_REQUEST] step=%s ollama_base_url=%s model=%s stream=%s think=%s options=%s timeout=%s messages=%s system_length=%s user_length=%s request_path=%s user_head=%s user_tail=%s",
                 verifier_step_label,
+                settings.ollama_base_url,
                 verifier_payload["model"],
+                verifier_payload["stream"],
                 verifier_payload["think"],
-                quality_options.get("num_predict"),
-                quality_options.get("temperature"),
-                quality_options.get("top_p"),
-                quality_options.get("top_k"),
+                json.dumps(quality_options, ensure_ascii=False),
+                QUALITY_STEP_TIMEOUT_SEC,
+                len(verifier_messages),
+                len(system_prompt),
+                len(user_prompt),
+                request_path,
+                user_prompt[:500],
+                user_prompt[-500:],
             )
             yield ("sse", prompt_debug_event(step_index + 20, f"RCA Loop {verifier_step_label}", verifier_payload))
 
@@ -464,11 +492,17 @@ async def stream_rca_reasoning(
             eval_count = None
             total_duration = None
             chunk_count = 0
+            first_thinking_elapsed = None
+            first_content_elapsed = None
+            raw_response_head = ""
+            raw_response_tail = ""
+            request_started_at = time.monotonic()
             content_parts: list[str] = []
             thinking_preview_parts: list[str] = []
 
             async def read_quality_stream() -> tuple[str, dict[str, Any], str, str, int, int]:
-                nonlocal chunk_count, thinking_length
+                nonlocal chunk_count, content_length, thinking_length, raw_size, raw_response_head, raw_response_tail
+                nonlocal first_thinking_elapsed, first_content_elapsed
                 final_chunk: dict[str, Any] = {}
 
                 async with client.stream(
@@ -480,6 +514,12 @@ async def stream_rca_reasoning(
                     async for line in verifier_response.aiter_lines():
                         if not line:
                             continue
+                        raw_line = line + "\n"
+                        raw_size += len(raw_line)
+                        if len(raw_response_head) < 5000:
+                            raw_response_head = (raw_response_head + raw_line)[:5000]
+                        raw_response_tail = (raw_response_tail + raw_line)[-5000:]
+
                         chunk = json.loads(line)
                         chunk_count += 1
                         message = chunk.get("message", {})
@@ -493,8 +533,13 @@ async def stream_rca_reasoning(
                         thinking = thinking or chunk.get("thinking") or ""
                         if content:
                             content_parts.append(content)
+                            content_length += len(content)
+                            if first_content_elapsed is None:
+                                first_content_elapsed = round(time.monotonic() - request_started_at, 3)
                         if thinking:
                             thinking_length += len(thinking)
+                            if first_thinking_elapsed is None:
+                                first_thinking_elapsed = round(time.monotonic() - request_started_at, 3)
                             remaining = QUALITY_THINKING_LOG_LIMIT - sum(
                                 len(part) for part in thinking_preview_parts
                             )
@@ -502,6 +547,18 @@ async def stream_rca_reasoning(
                                 thinking_preview_parts.append(thinking[:remaining])
                         if chunk.get("done"):
                             final_chunk = chunk
+                        logger.warning(
+                            "[QUALITY_STREAM_CHUNK] step=%s chunk_count=%s thinking_length=%s content_length=%s first_thinking_elapsed=%s first_content_elapsed=%s done_reason=%s keys=%s",
+                            verifier_step_label,
+                            chunk_count,
+                            thinking_length,
+                            content_length,
+                            first_thinking_elapsed,
+                            first_content_elapsed,
+                            chunk.get("done_reason"),
+                            list(chunk.keys()),
+                        )
+                        if chunk.get("done"):
                             break
 
                 corrected = "".join(content_parts)
@@ -513,6 +570,8 @@ async def stream_rca_reasoning(
                     "content_preview": corrected[:2000],
                     "thinking_length": thinking_length,
                     "thinking_preview": thinking_preview,
+                    "raw_response_head": raw_response_head,
+                    "raw_response_tail": raw_response_tail,
                 }
                 return (
                     corrected,
@@ -528,25 +587,30 @@ async def stream_rca_reasoning(
                     read_quality_stream(),
                     timeout=QUALITY_STEP_TIMEOUT_SEC,
                 )
-                raw_size = len(raw_payload)
-                logger.warning("[QUALITY_RAW_RESPONSE] %s", raw_payload[:5000])
+                elapsed_seconds = round(time.monotonic() - request_started_at, 3)
+                logger.warning("[QUALITY_RAW_RESPONSE_HEAD] %s", raw_response_head)
+                logger.warning("[QUALITY_RAW_RESPONSE_TAIL] %s", raw_response_tail)
                 done_reason = payload.get("done_reason")
                 eval_count = payload.get("eval_count")
                 total_duration = payload.get("total_duration")
                 content_length = len(corrected_result)
                 logger.warning(
-                    "[QUALITY_RESPONSE] step=%s thinking_length=%s content_length=%s done_reason=%s eval_count=%s total_duration=%s chunk_count=%s",
+                    "[QUALITY_RESPONSE] step=%s elapsed=%s thinking_length=%s content_length=%s done_reason=%s eval_count=%s total_duration=%s chunk_count=%s first_thinking_elapsed=%s first_content_elapsed=%s",
                     verifier_step_label,
+                    elapsed_seconds,
                     thinking_length,
                     content_length,
                     done_reason,
                     eval_count,
                     total_duration,
                     chunk_count,
+                    first_thinking_elapsed,
+                    first_content_elapsed,
                 )
                 if not corrected_result.strip():
                     logger.warning(
-                        "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s done_reason=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s raw_size=%s payload=%s",
+                        "[QUALITY_EMPTY_RESPONSE] elapsed=%s keys=%s message_keys=%s done_reason=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s raw_size=%s raw_head=%s raw_tail=%s payload=%s",
+                        elapsed_seconds,
                         list(payload.keys()),
                         list(payload.get("message", {}).keys()) if isinstance(payload.get("message"), dict) else None,
                         done_reason,
@@ -555,26 +619,32 @@ async def stream_rca_reasoning(
                         eval_count,
                         total_duration,
                         raw_size,
+                        raw_response_head,
+                        raw_response_tail,
                         raw_payload[:2000],
                     )
                     raise ValueError("Verifier 응답이 비어 있습니다")
             except Exception as exc:
                 exc_type = type(exc).__name__
                 exc_msg = str(exc)
+                elapsed_seconds = round(time.monotonic() - request_started_at, 3)
                 partial_result = "".join(content_parts)
                 if partial_result.strip():
                     content_length = len(partial_result)
                     logger.warning(
-                        "%s optional quality step partial result preserved after %s: %s content_length=%s thinking_length=%s eval_count=%s total_duration=%s chunk_count=%s raw_size=%s",
+                        "%s optional quality step partial result preserved after %s: %s elapsed=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s chunk_count=%s raw_size=%s raw_head=%s raw_tail=%s",
                         verifier_step_label,
                         exc_type,
                         exc_msg,
+                        elapsed_seconds,
                         content_length,
                         thinking_length,
                         eval_count,
                         total_duration,
                         chunk_count,
                         raw_size,
+                        raw_response_head,
+                        raw_response_tail,
                         exc_info=True,
                     )
                     if isinstance(exc, asyncio.TimeoutError):
@@ -594,16 +664,20 @@ async def stream_rca_reasoning(
                 if payload is not None and raw_size == 0:
                     raw_size = len(json.dumps(payload, ensure_ascii=False))
                 logger.warning(
-                    "%s optional quality step skipped: %s: %s done_reason=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s raw_size=%s",
+                    "%s optional quality step skipped: %s: %s elapsed=%s done_reason=%s content_length=%s thinking_length=%s eval_count=%s total_duration=%s chunk_count=%s raw_size=%s raw_head=%s raw_tail=%s",
                     verifier_step_label,
                     exc_type,
                     exc_msg,
+                    elapsed_seconds,
                     done_reason,
                     content_length,
                     thinking_length,
                     eval_count,
                     total_duration,
+                    chunk_count,
                     raw_size,
+                    raw_response_head,
+                    raw_response_tail,
                     exc_info=True,
                 )
                 if isinstance(exc, asyncio.TimeoutError):

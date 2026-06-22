@@ -40,8 +40,8 @@ from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_compact_rca_ir,
     build_compact_reasoning_json,
-    build_local_step2_verifier_messages,
-    build_local_step3_verifier_messages,
+    build_local_step2_enrichment_messages,
+    build_local_step3_rca_messages,
     build_rca_messages,
     build_report_prompt_from_reasoning,
     build_loop_reasoning_steps,
@@ -383,21 +383,22 @@ async def stream_rca_reasoning(
                 return
 
             if step_index == 1:
-                verifier_step_label = "STEP 2-A"
-                verifier_messages = build_local_step2_verifier_messages(
+                verifier_step_label = "STEP 2-A Observation Enrichment"
+                verifier_messages = build_local_step2_enrichment_messages(
                     compact_rca_ir,
                     step_results[0] if step_results else "",
                     step_response,
                 )
             else:
-                verifier_step_label = "STEP 3-A"
-                verifier_messages = build_local_step3_verifier_messages(
+                verifier_step_label = "STEP 3-A RCA 추론"
+                verifier_messages = build_local_step3_rca_messages(
                     compact_rca_ir,
+                    step_results[0] if step_results else "",
                     step_results[1] if len(step_results) > 1 else "",
                     step_response,
                 )
 
-            header = f"\n\n---\n**[{verifier_step_label} Verifier 보정 중...]**\n\n"
+            header = f"\n\n---\n**[{verifier_step_label} 실행 중...]**\n\n"
             response_parts.append(header)
             yield ("sse", f"data: {json.dumps({'token': header})}\n\n")
 

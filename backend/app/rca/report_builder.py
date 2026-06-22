@@ -818,6 +818,14 @@ STEP 2-A: 최소 관찰 실험
 
 역할:
 - [STEP2 결과]만 사용해 관찰 결과를 10줄 이내로 요약한다.
+- [최소 통계]는 분산/집중 여부 판단에만 사용한다.
+
+생각 규칙:
+- 최대 5개 bullet 이내로 생각한다.
+- 자기 검증 금지
+- 자기 수정 금지
+- 추가 분석 금지
+- 출력 형식 결정 후 즉시 응답 작성
 
 출력:
 관찰 결과
@@ -838,6 +846,9 @@ STEP 2-A: 최소 관찰 실험
 
 [STEP2 관찰 그룹]
 {step2_result}
+
+[최소 통계]
+{minimal_stats}
 """
 
 STEP3A_RCA_TEMPLATE = """\
@@ -846,6 +857,13 @@ STEP 3-A: 최소 RCA 실험
 역할:
 - [STEP2-A 결과], [STEP3 결과], [최소 통계]만 사용해 RCA 후보를 20줄 이내로 작성한다.
 - 출력은 최대 20줄, 최대 500토큰으로 작성한다.
+
+생각 규칙:
+- 최대 5개 bullet 이내로 생각한다.
+- 자기 검증 금지
+- 자기 수정 금지
+- 추가 분석 금지
+- 출력 형식 결정 후 즉시 응답 작성
 
 금지:
 - Pattern 재생성
@@ -1112,6 +1130,7 @@ def build_local_step2_enrichment_messages(
             "role": "user",
             "content": STEP2A_ENRICHMENT_TEMPLATE.format(
                 step2_result=step2_result[:2500],
+                minimal_stats=_minimal_rca_stats_payload(compact_rca_ir),
             ),
         },
     ]

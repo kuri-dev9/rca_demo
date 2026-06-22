@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 300.0
-QUALITY_STEP_MAX_TOKENS = 512
+QUALITY_STEP_MAX_TOKENS = 4096
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -417,6 +417,11 @@ async def stream_rca_reasoning(
             }
             yield ("sse", prompt_debug_event(step_index + 20, f"RCA Loop {verifier_step_label}", verifier_payload))
 
+            payload = None
+            done_reason = None
+            content_length = 0
+            thinking_length = 0
+            raw_size = 0
             try:
                 verifier_response = await asyncio.wait_for(
                     client.post(
@@ -427,29 +432,48 @@ async def stream_rca_reasoning(
                 )
                 verifier_response.raise_for_status()
                 payload = verifier_response.json()
-                logger.warning("[QUALITY_RAW_RESPONSE] %s", json.dumps(payload, ensure_ascii=False)[:5000])
+                raw_payload = json.dumps(payload, ensure_ascii=False)
+                raw_size = len(raw_payload)
+                logger.warning("[QUALITY_RAW_RESPONSE] %s", raw_payload[:5000])
+                message = payload.get("message", {})
                 corrected_result = (
-                    payload.get("message", {}).get("content")
+                    message.get("content") if isinstance(message, dict) else None
                     or payload.get("response")
                     or payload.get("content")
                     or ""
                 )
+                thinking = (
+                    message.get("thinking") if isinstance(message, dict) else None
+                ) or payload.get("thinking") or ""
+                done_reason = payload.get("done_reason")
+                content_length = len(corrected_result)
+                thinking_length = len(thinking)
                 if not corrected_result.strip():
                     logger.warning(
-                        "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s payload=%s",
+                        "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s done_reason=%s content_length=%s thinking_length=%s raw_size=%s payload=%s",
                         list(payload.keys()),
-                        list(payload.get("message", {}).keys()) if isinstance(payload.get("message"), dict) else None,
-                        json.dumps(payload, ensure_ascii=False)[:2000],
+                        list(message.keys()) if isinstance(message, dict) else None,
+                        done_reason,
+                        content_length,
+                        thinking_length,
+                        raw_size,
+                        raw_payload[:2000],
                     )
                     raise ValueError("Verifier 응답이 비어 있습니다")
             except Exception as exc:
                 exc_type = type(exc).__name__
                 exc_msg = str(exc)
+                if payload is not None and raw_size == 0:
+                    raw_size = len(json.dumps(payload, ensure_ascii=False))
                 logger.warning(
-                    "%s optional quality step skipped: %s: %s",
+                    "%s optional quality step skipped: %s: %s done_reason=%s content_length=%s thinking_length=%s raw_size=%s",
                     verifier_step_label,
                     exc_type,
                     exc_msg,
+                    done_reason,
+                    content_length,
+                    thinking_length,
+                    raw_size,
                     exc_info=True,
                 )
                 if isinstance(exc, asyncio.TimeoutError):

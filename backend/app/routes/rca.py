@@ -38,6 +38,8 @@ from app.rca.forbidden_terms import build_retry_instruction, find_forbidden_term
 from app.rca.parser import parse_file
 from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
+    build_fact_ranking_json,
+    build_observation_data_json,
     build_compact_rca_ir,
     build_compact_reasoning_json,
     build_local_step2_enrichment_messages,
@@ -79,6 +81,13 @@ def _rss_mb() -> float:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
         return 0.0
+
+
+def _is_json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads((text or "").strip()), dict)
+    except Exception:
+        return False
 
 
 def _subscriber_pattern_rows(analysis: RcaAnalysis) -> list[dict[str, Any]]:
@@ -534,38 +543,49 @@ async def stream_rca_reasoning(
                     yield f"data: {json.dumps({'token': marker})}\n\n"
 
                 step_response_parts: list[str] = []
-                llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "think": False, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
-                yield prompt_debug_event(step_index + 1, label, llm_payload)
-                try:
-                    async with client.stream(
-                        "POST",
-                        f"{settings.ollama_base_url}/api/chat",
-                        json=llm_payload,
-                    ) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if not line:
-                                continue
-                            chunk = json.loads(line)
-                            content = chunk.get("message", {}).get("content", "")
-                            if content:
-                                response_parts.append(content)
-                                step_response_parts.append(content)
-                                yield f"data: {json.dumps({'token': content})}\n\n"
-                            if chunk.get("done"):
-                                break
-                except Exception as exc:
-                    logger.error("rca loop %s core step failed: %s", logical_step or "RCA", exc, exc_info=True)
-                    fallback_response = (
-                        f"[{logical_step or 'RCA'} 생성 실패: {type(exc).__name__}: {exc}]\n"
-                        "이 단계는 실패했지만 RCA 파이프라인은 중단하지 않고 다음 단계로 진행합니다."
+                if loop_mode and step_index == 2:
+                    step_response = build_fact_ranking_json(compact_rca_ir)
+                    response_parts.append(step_response)
+                    step_response_parts.append(step_response)
+                    yield prompt_debug_event(
+                        step_index + 1,
+                        f"{label} (Code Ranking)",
+                        {"source": "deterministic", "output": json.loads(step_response)},
                     )
-                    response_parts.append(fallback_response)
-                    step_response_parts.append(fallback_response)
-                    failed_step_label = logical_step or "RCA"
-                    yield f"data: {json.dumps({'warning': f'{failed_step_label} 실패, 다음 단계 진행'})}\n\n"
-                    yield f"data: {json.dumps({'token': fallback_response})}\n\n"
-                step_response = "".join(step_response_parts)
+                    yield f"data: {json.dumps({'token': step_response})}\n\n"
+                else:
+                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "think": False, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
+                    yield prompt_debug_event(step_index + 1, label, llm_payload)
+                    try:
+                        async with client.stream(
+                            "POST",
+                            f"{settings.ollama_base_url}/api/chat",
+                            json=llm_payload,
+                        ) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if not line:
+                                    continue
+                                chunk = json.loads(line)
+                                content = chunk.get("message", {}).get("content", "")
+                                if content:
+                                    response_parts.append(content)
+                                    step_response_parts.append(content)
+                                    yield f"data: {json.dumps({'token': content})}\n\n"
+                                if chunk.get("done"):
+                                    break
+                    except Exception as exc:
+                        logger.error("rca loop %s core step failed: %s", logical_step or "RCA", exc, exc_info=True)
+                        fallback_response = (
+                            f"[{logical_step or 'RCA'} 생성 실패: {type(exc).__name__}: {exc}]\n"
+                            "이 단계는 실패했지만 RCA 파이프라인은 중단하지 않고 다음 단계로 진행합니다."
+                        )
+                        response_parts.append(fallback_response)
+                        step_response_parts.append(fallback_response)
+                        failed_step_label = logical_step or "RCA"
+                        yield f"data: {json.dumps({'warning': f'{failed_step_label} 실패, 다음 단계 진행'})}\n\n"
+                        yield f"data: {json.dumps({'token': fallback_response})}\n\n"
+                    step_response = "".join(step_response_parts)
 
                 if loop_mode:
                     step_key = f"step{step_index + 1}"
@@ -636,7 +656,11 @@ async def stream_rca_reasoning(
                             yield verifier_event
                         elif event_type == "result":
                             enriched_result = verifier_event
-                    step2_enrichment_result = enriched_result or step_response
+                    fallback_observation = build_observation_data_json(compact_rca_ir)
+                    step2_enrichment_result = enriched_result or fallback_observation
+                    if not _is_json_object(step2_enrichment_result):
+                        logger.warning("STEP 2-A returned non-JSON output; using deterministic observation fallback")
+                        step2_enrichment_result = fallback_observation
 
                     if hallucination_step2:
                         verified_enrichment = None
@@ -651,6 +675,9 @@ async def stream_rca_reasoning(
                                 verified_enrichment = verifier_event
                         if verified_enrichment is not None:
                             step2_enrichment_result = verified_enrichment
+                            if not _is_json_object(step2_enrichment_result):
+                                logger.warning("STEP 2-B returned non-JSON output; keeping STEP 2-A observation")
+                                step2_enrichment_result = fallback_observation
 
                 if loop_mode and step_index == 2:
                     corrected_result = None

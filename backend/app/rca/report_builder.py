@@ -825,6 +825,7 @@ STEP 2-A: 최소 관찰 실험
 - MME 분산 여부:
 - eNB 분산 여부:
 - Attach_MO 집중 여부:
+- 반복 출현 패턴 여부:
 
 금지:
 - RCA
@@ -833,7 +834,7 @@ STEP 2-A: 최소 관찰 실험
 - 우선순위
 - 추가 확인 필요
 
-출력은 10줄 이내로 작성한다.
+출력은 10줄 이내, 최대 300토큰으로 작성한다.
 
 [STEP2 관찰 그룹]
 {step2_result}
@@ -843,7 +844,8 @@ STEP3A_RCA_TEMPLATE = """\
 STEP 3-A: 최소 RCA 실험
 
 역할:
-- [STEP2-A 결과]와 [STEP3 결과]만 사용해 RCA 후보 2개를 15줄 이내로 작성한다.
+- [STEP2-A 결과], [STEP3 결과], [최소 통계]만 사용해 RCA 후보를 20줄 이내로 작성한다.
+- 출력은 최대 20줄, 최대 500토큰으로 작성한다.
 
 금지:
 - Pattern 재생성
@@ -852,6 +854,12 @@ STEP 3-A: 최소 RCA 실험
 - Observation Enrichment
 
 출력:
+관찰 결과
+- MME 분산 여부:
+- eNB 분산 여부:
+- Attach_MO 집중 여부:
+- Core/RAN 집중 여부:
+
 RCA 후보
 1순위
 근거:
@@ -859,11 +867,19 @@ RCA 후보
 2순위
 근거:
 
+3순위
+근거:
+
+추가 확인 필요
+
 [STEP2-A 결과]
 {step2a_result}
 
 [STEP3 결과]
 {step3_result}
+
+[최소 통계]
+{minimal_stats}
 """
 
 
@@ -1002,6 +1018,30 @@ def _step3_stats_payload(compact_rca_ir: dict[str, Any]) -> str:
     return json.dumps(stats_payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _minimal_rca_stats_payload(compact_rca_ir: dict[str, Any]) -> str:
+    stats = _get_data(compact_rca_ir, "statistics", {})
+    hints = _get_data(compact_rca_ir, "rca_hints", {})
+    entity = _get_data(compact_rca_ir, "entity_failure_contribution", {})
+    pattern_counts = hints.get("pattern_counts", {}) if hints else {}
+    procedures = hints.get("high_failure_rate_procedures", {}) if hints else {}
+    attach_mo = procedures.get("Attach_MO") or procedures.get("ATTACH_MO") or 0
+    if isinstance(attach_mo, dict):
+        attach_mo = attach_mo.get("failure_rate", 0)
+    top_mme = entity.get("top_mme", []) if entity else []
+    mme_distribution = [
+        _num(e.get("failure_contribution_pct"))
+        for e in top_mme[:4]
+    ]
+    payload = {
+        "failure_rate": stats.get("failure_rate", 0),
+        "ran_candidate_pct": pattern_counts.get("ran_candidate_pct", 0),
+        "core_candidate_pct": pattern_counts.get("core_candidate_pct", 0),
+        "mme_distribution": mme_distribution,
+        "attach_mo_failure_rate": _num(attach_mo),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _observation_enrichment_payload(compact_rca_ir: dict[str, Any]) -> str:
     shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
     error_chains = _get_data(compact_rca_ir, "error_chains", [])
@@ -1089,6 +1129,7 @@ def build_local_step3_rca_messages(
             "content": STEP3A_RCA_TEMPLATE.format(
                 step2a_result=step2a_result[:1500],
                 step3_result=step3_result[:1500],
+                minimal_stats=_minimal_rca_stats_payload(compact_rca_ir),
             ),
         },
     ]

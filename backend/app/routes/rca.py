@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 30.0
-QUALITY_STEP_MAX_TOKENS = 300
+QUALITY_STEP_MAX_TOKENS = 512
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -410,9 +410,9 @@ async def stream_rca_reasoning(
                 "think": True,
                 "options": {
                     "num_predict": QUALITY_STEP_MAX_TOKENS,
-                    "temperature": 0.1,
-                    "repeat_penalty": 1.2,
-                    "repeat_last_n": 128,
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "top_k": 64,
                 },
             }
             yield ("sse", prompt_debug_event(step_index + 20, f"RCA Loop {verifier_step_label}", verifier_payload))

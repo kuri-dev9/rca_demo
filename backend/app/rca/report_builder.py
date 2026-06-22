@@ -814,120 +814,56 @@ QUALITY_STEP_SYSTEM_PROMPT = """\
 """
 
 STEP2A_ENRICHMENT_TEMPLATE = """\
-STEP 2-A: Observation Data Builder
+STEP 2-A: 최소 관찰 실험
 
 역할:
-- 원본 통계 데이터를 RCA에 적합한 관찰 정보로 압축한다.
-- [입력 관찰 데이터]에 있는 Fact만 사용한다.
-- RCA 후보, 원인 추론, 도메인 판단은 출력하지 않는다.
-- 출력은 JSON 객체만 허용한다. markdown, 설명 문장, 코드블록은 금지한다.
-
-허용:
-- Count 정리
-- Failure Share 계산
-- IMSI 영향 범위 정리
-- MME 영향 범위 정리
-- eNB 영향 범위 정리
-- Error Chain 정리
-- 상위 패턴 정리
-- 집중도 정리
-- 분산도 정리
-
-금지:
-- RCA 수행
-- 원인 추론
-- 도메인 판단
-- 설정 오류 추론
-- 가입자 원인 판단
-- UE 원인 판단
-- USIM 원인 판단
-- 입력 데이터에 없는 패턴/에러/Cause/Error Chain 생성
-
-출력 JSON 스키마:
-{{
-  "top_patterns": [
-    {{
-      "rank": 1,
-      "interface": "<interface>",
-      "message": "<message>",
-      "cause": "<cause>",
-      "count": 0,
-      "failure_share_pct": 0.0,
-      "affected_imsi_count": 0,
-      "affected_mme_count": 0,
-      "affected_enb_count": 0,
-      "error_chain": null
-    }}
-  ],
-  "observation_summary": {{
-    "top3_failure_share_pct": 0.0,
-    "attach_mo_focus": false,
-    "mme_distribution": "unknown",
-    "core_candidate_pct": 0.0,
-    "ran_candidate_pct": 0.0
-  }}
-}}
-
-[STEP2 관찰 그룹]
-{step2_result}
-
-[입력 관찰 데이터]
-{observation_payload}
-"""
-
-STEP3A_RCA_TEMPLATE = """\
-STEP 3-A: RCA 추론
-
-역할:
-- [RCA_INPUT_JSON]만 해석해 RCA 후보를 도출한다.
-- STEP1/STEP2 전체 내용을 요구하거나 재구성하지 않는다.
-- 입력에 없는 Interface/Message/Cause/Error Chain을 만들지 않는다.
-
-허용:
-- RCA 추론
-- 공통 특성 분석
-- 도메인 후보 제시
-- 우선순위 선정
-- 단정이 어려운 경우 "가능성", "추가 확인 필요"로 표현
-
-금지:
-- 입력 데이터에 없는 Interface 생성
-- 입력 데이터에 없는 Message 생성
-- 입력 데이터에 없는 패턴 생성
-- 입력 데이터에 없는 에러 생성
-- 입력 데이터에 없는 Cause 생성
-- 입력 데이터에 없는 Error Chain 생성
-- 단말/UE/USIM 자체 원인 확정
+- [STEP2 결과]만 사용해 관찰 결과를 10줄 이내로 요약한다.
 
 출력:
 관찰 결과
-- 상위 패턴 공통 특성:
-- 분산도 분석:
-- 집중도 분석:
+- 가장 높은 비중 패턴:
+- MME 분산 여부:
+- eNB 분산 여부:
+- Attach_MO 집중 여부:
 
+금지:
+- RCA
+- 도메인 판단
+- 원인 분석
+- 우선순위
+- 추가 확인 필요
+
+출력은 10줄 이내로 작성한다.
+
+[STEP2 관찰 그룹]
+{step2_result}
+"""
+
+STEP3A_RCA_TEMPLATE = """\
+STEP 3-A: 최소 RCA 실험
+
+역할:
+- [STEP2-A 결과]와 [STEP3 결과]만 사용해 RCA 후보 2개를 15줄 이내로 작성한다.
+
+금지:
+- Pattern 재생성
+- Count 계산
+- Failure Share 계산
+- Observation Enrichment
+
+출력:
 RCA 후보
 1순위
-도메인:
 근거:
-추가 확인 필요:
 
 2순위
-도메인:
 근거:
-추가 확인 필요:
 
-3순위
-도메인:
-근거:
-추가 확인 필요:
+[STEP2-A 결과]
+{step2a_result}
 
-최종 판단
-가장 가능성 높은 도메인:
-판단 근거:
-판단 한계:
-
-[RCA_INPUT_JSON]
-{rca_input_json}
+[STEP3 결과]
+{step3_result}
 """
 
 
@@ -1066,13 +1002,6 @@ def _step3_stats_payload(compact_rca_ir: dict[str, Any]) -> str:
     return json.dumps(stats_payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _compact_stats_dict(compact_rca_ir: dict[str, Any]) -> dict[str, Any]:
-    try:
-        return json.loads(_step3_stats_payload(compact_rca_ir))
-    except Exception:
-        return {}
-
-
 def _observation_enrichment_payload(compact_rca_ir: dict[str, Any]) -> str:
     shared = _get_data(compact_rca_ir, "shared_failure_observations", [])
     error_chains = _get_data(compact_rca_ir, "error_chains", [])
@@ -1133,76 +1062,16 @@ def build_fact_ranking_json(compact_rca_ir: dict[str, Any], limit: int = 10) -> 
     return json.dumps({"ranking": ranking}, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_observation_data_json(compact_rca_ir: dict[str, Any], limit: int = 10) -> str:
-    """Deterministic STEP2-A fallback in the same JSON contract."""
-    source = json.loads(_observation_enrichment_payload(compact_rca_ir))
-    patterns = sorted(
-        source.get("patterns", []),
-        key=lambda row: (
-            _num(row.get("count")),
-            _num(row.get("affected_imsi_count")),
-            _num(row.get("affected_mme_count")),
-            _num(row.get("affected_enb_count")),
-        ),
-        reverse=True,
-    )
-    top_patterns = []
-    for idx, row in enumerate(patterns[:limit], start=1):
-        top_patterns.append({
-            "rank": idx,
-            "interface": row.get("interface"),
-            "message": row.get("message"),
-            "cause": row.get("cause"),
-            "count": int(_num(row.get("count"))),
-            "failure_share_pct": _num(row.get("failure_share_pct")),
-            "affected_imsi_count": int(_num(row.get("affected_imsi_count"))),
-            "affected_mme_count": int(_num(row.get("affected_mme_count"))),
-            "affected_enb_count": int(_num(row.get("affected_enb_count"))),
-            "error_chain": None,
-        })
-
-    top3_share = round(sum(_num(row.get("failure_share_pct")) for row in top_patterns[:3]), 1)
-    summary = source.get("candidate_pattern_summary", {})
-    observation = {
-        "top_patterns": top_patterns,
-        "observation_summary": {
-            "top3_failure_share_pct": top3_share,
-            "attach_mo_focus": any("ATTACH" in str(row.get("message", "")).upper() for row in top_patterns),
-            "mme_distribution": "distributed",
-            "core_candidate_pct": _num(summary.get("core_candidate_pct")),
-            "ran_candidate_pct": _num(summary.get("ran_candidate_pct")),
-        },
-    }
-    return json.dumps(observation, ensure_ascii=False, separators=(",", ":"))
-
-
-def _json_or_raw(text: str) -> Any:
-    stripped = (text or "").strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        stripped = "\n".join(lines).strip()
-    try:
-        return json.loads(stripped)
-    except Exception:
-        return stripped
-
-
 def build_local_step2_enrichment_messages(
     compact_rca_ir: dict[str, Any],
     step2_result: str,
 ) -> list[dict[str, str]]:
-    observation_payload = _observation_enrichment_payload(compact_rca_ir)
     return [
         {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": STEP2A_ENRICHMENT_TEMPLATE.format(
-                step2_result=step2_result[:3000],
-                observation_payload=observation_payload[:5000],
+                step2_result=step2_result[:2500],
             ),
         },
     ]
@@ -1213,18 +1082,13 @@ def build_local_step3_rca_messages(
     step2a_result: str,
     step3_result: str,
 ) -> list[dict[str, str]]:
-    rca_input = {
-        "observation": _json_or_raw(step2a_result),
-        "ranking": _json_or_raw(step3_result),
-        "stats": _compact_stats_dict(compact_rca_ir),
-    }
-    rca_input_json = json.dumps(rca_input, ensure_ascii=False, separators=(",", ":"))
     return [
         {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": STEP3A_RCA_TEMPLATE.format(
-                rca_input_json=rca_input_json[:5000],
+                step2a_result=step2a_result[:1500],
+                step3_result=step3_result[:1500],
             ),
         },
     ]

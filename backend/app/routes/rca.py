@@ -39,7 +39,6 @@ from app.rca.parser import parse_file
 from app.rca.spec_loader import get_call_type_name
 from app.rca.report_builder import (
     build_fact_ranking_json,
-    build_observation_data_json,
     build_compact_rca_ir,
     build_compact_reasoning_json,
     build_local_step2_enrichment_messages,
@@ -58,7 +57,7 @@ logger = logging.getLogger(__name__)
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 30.0
-QUALITY_STEP_MAX_TOKENS = 900
+QUALITY_STEP_MAX_TOKENS = 300
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -81,13 +80,6 @@ def _rss_mb() -> float:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
         return 0.0
-
-
-def _is_json_object(text: str) -> bool:
-    try:
-        return isinstance(json.loads((text or "").strip()), dict)
-    except Exception:
-        return False
 
 
 def _subscriber_pattern_rows(analysis: RcaAnalysis) -> list[dict[str, Any]]:
@@ -656,11 +648,7 @@ async def stream_rca_reasoning(
                             yield verifier_event
                         elif event_type == "result":
                             enriched_result = verifier_event
-                    fallback_observation = build_observation_data_json(compact_rca_ir)
-                    step2_enrichment_result = enriched_result or fallback_observation
-                    if not _is_json_object(step2_enrichment_result):
-                        logger.warning("STEP 2-A returned non-JSON output; using deterministic observation fallback")
-                        step2_enrichment_result = fallback_observation
+                    step2_enrichment_result = enriched_result or step_response
 
                     if hallucination_step2:
                         verified_enrichment = None
@@ -675,9 +663,6 @@ async def stream_rca_reasoning(
                                 verified_enrichment = verifier_event
                         if verified_enrichment is not None:
                             step2_enrichment_result = verified_enrichment
-                            if not _is_json_object(step2_enrichment_result):
-                                logger.warning("STEP 2-B returned non-JSON output; keeping STEP 2-A observation")
-                                step2_enrichment_result = fallback_observation
 
                 if loop_mode and step_index == 2:
                     corrected_result = None

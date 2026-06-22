@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 300.0
-QUALITY_STEP_MAX_TOKENS = 4096
+DEFAULT_NUM_PREDICT = 1024
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -66,6 +66,26 @@ _SAMPLE_FILE_CANDIDATES = [
     Path(__file__).resolve().parents[2] / "docs" / "data" / "sample.dat",
     Path(__file__).resolve().parents[3] / "docs" / "data" / "sample.dat",
 ]
+
+
+def build_quality_options(*, think: bool, multiplier: int = 1) -> dict[str, Any]:
+    options: dict[str, Any] = {"num_predict": DEFAULT_NUM_PREDICT}
+    if think:
+        options.update({
+            "num_predict": DEFAULT_NUM_PREDICT * multiplier,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 64,
+        })
+    return options
+
+
+def build_core_options() -> dict[str, Any]:
+    return {
+        "num_predict": DEFAULT_NUM_PREDICT,
+        "repeat_penalty": 1.3,
+        "repeat_last_n": 256,
+    }
 
 
 def _sample_file_path() -> Path:
@@ -299,7 +319,13 @@ async def stream_rca_report(
         llm_call_index = 0
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                llm_payload = {"model": conv.model or RCA_MODEL, "messages": messages, "stream": True, "think": False}
+                llm_payload = {
+                    "model": conv.model or RCA_MODEL,
+                    "messages": messages,
+                    "stream": True,
+                    "think": False,
+                    "options": build_quality_options(think=False),
+                }
                 llm_call_index += 1
                 yield prompt_debug_event(llm_call_index, "RCA LLM Prompt", llm_payload)
                 async with client.stream(
@@ -387,12 +413,14 @@ async def stream_rca_reasoning(
 
             if step_index == 1:
                 verifier_step_label = "STEP 2-A Observation Enrichment"
+                quality_multiplier = 3
                 verifier_messages = build_local_step2_enrichment_messages(
                     compact_rca_ir,
                     step_response,
                 )
             else:
                 verifier_step_label = "STEP 3-A RCA 추론"
+                quality_multiplier = 4
                 verifier_messages = build_local_step3_rca_messages(
                     compact_rca_ir,
                     step2a_result or (step_results[1] if len(step_results) > 1 else ""),
@@ -408,13 +436,19 @@ async def stream_rca_reasoning(
                 "messages": verifier_messages,
                 "stream": False,
                 "think": True,
-                "options": {
-                    "num_predict": QUALITY_STEP_MAX_TOKENS,
-                    "temperature": 1.0,
-                    "top_p": 0.95,
-                    "top_k": 64,
-                },
+                "options": build_quality_options(think=True, multiplier=quality_multiplier),
             }
+            quality_options = verifier_payload["options"]
+            logger.warning(
+                "[QUALITY_REQUEST] step=%s model=%s think=%s num_predict=%s temperature=%s top_p=%s top_k=%s",
+                verifier_step_label,
+                verifier_payload["model"],
+                verifier_payload["think"],
+                quality_options.get("num_predict"),
+                quality_options.get("temperature"),
+                quality_options.get("top_p"),
+                quality_options.get("top_k"),
+            )
             yield ("sse", prompt_debug_event(step_index + 20, f"RCA Loop {verifier_step_label}", verifier_payload))
 
             payload = None
@@ -448,6 +482,13 @@ async def stream_rca_reasoning(
                 done_reason = payload.get("done_reason")
                 content_length = len(corrected_result)
                 thinking_length = len(thinking)
+                logger.warning(
+                    "[QUALITY_RESPONSE] step=%s done_reason=%s content_length=%s thinking_length=%s",
+                    verifier_step_label,
+                    done_reason,
+                    content_length,
+                    thinking_length,
+                )
                 if not corrected_result.strip():
                     logger.warning(
                         "[QUALITY_EMPTY_RESPONSE] keys=%s message_keys=%s done_reason=%s content_length=%s thinking_length=%s raw_size=%s payload=%s",
@@ -598,7 +639,13 @@ async def stream_rca_reasoning(
                     )
                     yield f"data: {json.dumps({'token': step_response})}\n\n"
                 else:
-                    llm_payload = {"model": conv.model or RCA_MODEL, "messages": call_messages, "stream": True, "think": False, "options": {"repeat_penalty": 1.3, "repeat_last_n": 256}}
+                    llm_payload = {
+                        "model": conv.model or RCA_MODEL,
+                        "messages": call_messages,
+                        "stream": True,
+                        "think": False,
+                        "options": build_core_options(),
+                    }
                     yield prompt_debug_event(step_index + 1, label, llm_payload)
                     try:
                         async with client.stream(
@@ -652,7 +699,7 @@ async def stream_rca_reasoning(
                             "messages": retry_messages,
                             "stream": True,
                             "think": False,
-                            "options": {"repeat_penalty": 1.3, "repeat_last_n": 256},
+                            "options": build_core_options(),
                         }
                         yield prompt_debug_event(step_index + 1, f"{label} (Retry)", retry_payload)
                         retry_parts: list[str] = []

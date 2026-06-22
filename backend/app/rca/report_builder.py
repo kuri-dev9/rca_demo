@@ -713,13 +713,20 @@ STEP_SYSTEM_PROMPT = """\
 STEP1_TEMPLATE = """\
 STEP 1: 의미 해석
 
-[입력 통계]의 error_stats 항목마다 정확히 아래 4줄만 작성한다:
+[입력 통계]의 error_stats 항목마다 정확히 아래 3줄만 작성한다:
 에러: <interface> / <message> / <cause>
 구간: <3GPP 노드 간 구간>
-의미: <3GPP 절차상 의미, 1문장>
-주의사항: <추가 확인이 필요한 부분, 1문장. 없으면 "없음">
+의미: <3GPP 절차상 Cause 발생 의미, 1문장>
 
-원인 추정·확정은 하지 않는다 (PDN_CONNECTIVITY_REJECT, Synch_failure 등도 동일).
+STEP1은 3GPP 의미 설명까지만 수행한다.
+원인 판단, 도메인 판단, 가입자 판단, 단말 판단은 하지 않는다.
+아래 Cause는 가입자/단말 원인으로 단정하지 않고 Cause 발생 의미만 설명한다:
+- PLMN_not_allowed
+- Requested_service_option_not_subscribed
+- Operator_Determined_Barring
+- Synch_failure
+- Implicitly_detached
+
 항목 사이는 빈 줄로 구분하고, error_stats 항목 수만큼만 작성한 뒤 종료한다.
 같은 문장을 반복하지 않는다. entity_id, 조치 방향, 상관관계 분석은 작성하지 않는다.
 

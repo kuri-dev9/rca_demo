@@ -795,6 +795,7 @@ STEP4는 RCA 수행 단계가 아니며, 새로운 원인/도메인/장애 시�
    (예: S6a_Diameter / AIR_AIA / Unassigned 대상 IMSI의 HSS 가입자 프로파일 확인)
 
 [STEP3-A 또는 STEP3 결과]나 입력 데이터에 없는 원인·수치·장비·인터페이스·절차·조치를 만들지 않는다.
+실패율은 [실제 장비 데이터]의 failure_rate_display 값을 그대로 인용하고, 소수 값을 다시 퍼센트로 변환하지 않는다.
 단말 측 RCA/조치는 작성하지 않는다. 확정할 수 없으면 "가능성"/"추가 확인 필요"로 표현한다.
 
 [허용 장비 및 인터페이스 목록]
@@ -850,16 +851,16 @@ STEP3A_RCA_TEMPLATE = """\
 STEP 3-A: RCA 후보 정리
 
 역할:
-- [STEP2-A 결과], [STEP3 결과], [최소 통계]를 사용해 RCA 후보를 정리한다.
-- 입력 데이터에 없는 패턴, 에러, Cause, 장비, 수치를 생성하지 않는다.
+- [STEP2-A 결과], [STEP3 Ranking], [최소 통계]를 사용해 RCA 후보를 정리한다.
 - 관찰 결과와 RCA 후보를 자연어로 정리한다.
 - 필요하면 최대 3000토큰까지 사용할 수 있다.
 
 작성 기준:
-- STEP2-A 결과는 관찰 근거로 사용한다.
+- STEP2-A 관찰 결과를 RCA 후보의 주요 근거로 사용한다.
 - STEP3 Ranking은 RCA 후보 우선순위 판단에 사용한다.
 - 최소 통계는 분산 여부 및 영향 범위 판단에 사용한다.
-- 입력 데이터에 없는 정보는 추정하지 않는다.
+- 입력 데이터에 있는 패턴, 에러, Cause, 장비, 수치를 기준으로 작성한다.
+- 각 RCA 후보는 Failure Chain, 반복 출현 패턴, MME 분산 정보, Attach_MO 집중 정보, Core/RAN 분포 정보, STEP2-A 관찰 결과 중 최소 1개 이상을 근거로 작성한다.
 - 한국어로 작성한다.
 
 출력:
@@ -884,7 +885,7 @@ RCA 후보
 [STEP2-A 결과]
 {step2a_result}
 
-[STEP3 결과]
+[STEP3 Ranking]
 {step3_result}
 
 [최소 통계]
@@ -1111,6 +1112,26 @@ def build_fact_ranking_json(compact_rca_ir: dict[str, Any], limit: int = 10) -> 
     return json.dumps({"ranking": ranking}, ensure_ascii=False, separators=(",", ":"))
 
 
+def _format_fact_ranking_text(step3_result: str) -> str:
+    try:
+        payload = json.loads(step3_result)
+    except (TypeError, json.JSONDecodeError):
+        return step3_result
+    ranking = payload.get("ranking") if isinstance(payload, dict) else None
+    if not isinstance(ranking, list):
+        return step3_result
+
+    lines = []
+    for row in ranking:
+        if not isinstance(row, dict):
+            continue
+        rank = row.get("rank", "-")
+        pattern = row.get("pattern", "-")
+        count = row.get("count", "-")
+        lines.append(f"{rank}위 {pattern} ({count})")
+    return "\n".join(lines) if lines else step3_result
+
+
 def build_local_step2_enrichment_messages(
     compact_rca_ir: dict[str, Any],
     step2_result: str,
@@ -1140,7 +1161,7 @@ def build_local_step3_rca_messages(
             "role": "user",
             "content": STEP3A_RCA_TEMPLATE.format(
                 step2a_result=step2a_result[:1500],
-                step3_result=step3_result[:1500],
+                step3_result=_format_fact_ranking_text(step3_result)[:1500],
                 minimal_stats=_minimal_rca_stats_payload(compact_rca_ir),
             ),
         },
@@ -1164,6 +1185,8 @@ def build_loop_step4_messages(
         "statistics": {
             "failure_count": stats.get("failure_count", 0),
             "failure_rate": stats.get("failure_rate", 0),
+            "failure_rate_display": f"{_num(stats.get('failure_rate', 0)):.2f}%",
+            "failure_rate_unit": "percent",
         },
         "top_mme": [
             {

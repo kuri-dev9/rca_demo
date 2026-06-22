@@ -824,7 +824,8 @@ STEP2A_ENRICHMENT_TEMPLATE = """\
 STEP 2-A: 최소 관찰 실험
 
 역할:
-- [STEP2 결과]만 사용해 관찰 결과를 요약한다.
+- [STEP2 결과], [STEP3 Ranking], [최소 통계]를 사용해 관찰 결과를 요약한다.
+- [STEP3 Ranking]은 가장 높은 비중 패턴 판단에만 사용한다.
 - [최소 통계]는 분산/집중 여부 판단에만 사용한다.
 
 생각 규칙:
@@ -843,7 +844,8 @@ STEP 2-A: 최소 관찰 실험
 - 반복 출현 패턴 여부:
 
 한국어로 작성한다.
-필요하면 최대 2000토큰까지 사용할 수 있다.
+간결하게 작성한다.
+필요하면 최대 3000토큰까지 사용할 수 있다.
 
 금지:
 - RCA
@@ -855,6 +857,9 @@ STEP 2-A: 최소 관찰 실험
 [STEP2 관찰 그룹]
 {step2_result}
 
+[STEP3 Ranking]
+{step3_ranking}
+
 [최소 통계]
 {minimal_stats}
 """
@@ -865,7 +870,7 @@ STEP 3-A: 최소 RCA 실험
 역할:
 - [STEP2-A 결과], [STEP3 결과], [최소 통계]만 사용해 RCA 후보를 작성한다.
 - 관찰 결과, RCA 후보, 추가 확인 필요 형식만 유지한다.
-- 필요하면 최대 2000토큰까지 사용할 수 있다.
+- 필요하면 최대 3000토큰까지 사용할 수 있다.
 
 생각 규칙:
 - 최대 5개 bullet 이내로 생각한다.
@@ -1132,6 +1137,7 @@ def build_fact_ranking_json(compact_rca_ir: dict[str, Any], limit: int = 10) -> 
 def build_local_step2_enrichment_messages(
     compact_rca_ir: dict[str, Any],
     step2_result: str,
+    step3_ranking: str,
 ) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": QUALITY_STEP_SYSTEM_PROMPT},
@@ -1139,6 +1145,7 @@ def build_local_step2_enrichment_messages(
             "role": "user",
             "content": STEP2A_ENRICHMENT_TEMPLATE.format(
                 step2_result=step2_result[:2500],
+                step3_ranking=step3_ranking[:1500],
                 minimal_stats=_minimal_rca_stats_payload(compact_rca_ir),
             ),
         },

@@ -57,9 +57,11 @@ logger = logging.getLogger(__name__)
 RCA_MODEL = "gemma4:26b"
 RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 300.0
-QUALITY_BASE_NUM_PREDICT = 1024
+BASE_NUM_PREDICT = 1024
+STEP4_NUM_PREDICT = 2048
 STEP2A_NUM_PREDICT_MULTIPLIER = 3
 STEP3A_NUM_PREDICT_MULTIPLIER = 4
+QUALITY_THINKING_LOG_LIMIT = 2000
 _SAMPLE_FILE_CANDIDATES = [
     Path(os.environ["PROJ_HOME"]) / "docs" / "data" / "sample.dat"
     if os.environ.get("PROJ_HOME")
@@ -71,10 +73,10 @@ _SAMPLE_FILE_CANDIDATES = [
 
 
 def build_quality_options(*, think: bool, multiplier: int = 1) -> dict[str, Any]:
-    options: dict[str, Any] = {"num_predict": QUALITY_BASE_NUM_PREDICT}
+    options: dict[str, Any] = {"num_predict": BASE_NUM_PREDICT}
     if think:
         options.update({
-            "num_predict": QUALITY_BASE_NUM_PREDICT * multiplier,
+            "num_predict": BASE_NUM_PREDICT * multiplier,
             "temperature": 1.0,
             "top_p": 0.95,
             "top_k": 64,
@@ -82,9 +84,9 @@ def build_quality_options(*, think: bool, multiplier: int = 1) -> dict[str, Any]
     return options
 
 
-def build_core_options() -> dict[str, Any]:
+def build_core_options(*, num_predict: int = BASE_NUM_PREDICT) -> dict[str, Any]:
     return {
-        "num_predict": QUALITY_BASE_NUM_PREDICT,
+        "num_predict": num_predict,
         "repeat_penalty": 1.3,
         "repeat_last_n": 256,
     }
@@ -246,11 +248,12 @@ async def analyze_xdr(
     if not file.filename or not file.filename.lower().endswith(".dat"):
         raise HTTPException(status_code=422, detail="xDR .dat 파일만 지원합니다")
 
-    # 임시 파일 저장
-    with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as tmp:
-        tmp_path = tmp.name
-        total_size = 0
-        try:
+    tmp_path = ""
+    try:
+        # 임시 파일 저장
+        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as tmp:
+            tmp_path = tmp.name
+            total_size = 0
             while True:
                 chunk = await file.read(8 * 1024 * 1024)
                 if not chunk:
@@ -259,18 +262,17 @@ async def analyze_xdr(
                 if total_size > RCA_MAX_FILE_BYTES:
                     raise HTTPException(status_code=413, detail="파일 크기 제한(500MB) 초과")
                 tmp.write(chunk)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"파일 저장 실패: {exc}") from exc
-
-    try:
         return await _analyze_file_path(tmp_path, file.filename, model or RCA_MODEL, db, loop_mode)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"파일 저장/분석 실패: {exc}") from exc
     finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 @sample_router.post("/sample")
@@ -326,7 +328,7 @@ async def stream_rca_report(
                     "messages": messages,
                     "stream": True,
                     "think": False,
-                    "options": build_quality_options(think=False),
+                    "options": build_core_options(num_predict=STEP4_NUM_PREDICT),
                 }
                 llm_call_index += 1
                 yield prompt_debug_event(llm_call_index, "RCA LLM Prompt", llm_payload)
@@ -419,6 +421,7 @@ async def stream_rca_reasoning(
                 verifier_messages = build_local_step2_enrichment_messages(
                     compact_rca_ir,
                     step_response,
+                    build_fact_ranking_json(compact_rca_ir),
                 )
             else:
                 verifier_step_label = "STEP 3-A RCA 추론"
@@ -460,11 +463,12 @@ async def stream_rca_reasoning(
             raw_size = 0
             eval_count = None
             total_duration = None
+            chunk_count = 0
+            content_parts: list[str] = []
+            thinking_preview_parts: list[str] = []
 
-            async def read_quality_stream() -> tuple[str, dict[str, Any], str, str]:
-                content_parts: list[str] = []
-                thinking_parts: list[str] = []
-                chunks: list[dict[str, Any]] = []
+            async def read_quality_stream() -> tuple[str, dict[str, Any], str, str, int, int]:
+                nonlocal chunk_count, thinking_length
                 final_chunk: dict[str, Any] = {}
 
                 async with client.stream(
@@ -477,7 +481,7 @@ async def stream_rca_reasoning(
                         if not line:
                             continue
                         chunk = json.loads(line)
-                        chunks.append(chunk)
+                        chunk_count += 1
                         message = chunk.get("message", {})
                         if isinstance(message, dict):
                             content = message.get("content") or ""
@@ -490,26 +494,37 @@ async def stream_rca_reasoning(
                         if content:
                             content_parts.append(content)
                         if thinking:
-                            thinking_parts.append(thinking)
+                            thinking_length += len(thinking)
+                            remaining = QUALITY_THINKING_LOG_LIMIT - sum(
+                                len(part) for part in thinking_preview_parts
+                            )
+                            if remaining > 0:
+                                thinking_preview_parts.append(thinking[:remaining])
                         if chunk.get("done"):
                             final_chunk = chunk
                             break
 
+                corrected = "".join(content_parts)
+                thinking_preview = "".join(thinking_preview_parts)
                 stream_payload = {
-                    "chunks": chunks,
+                    "chunk_count": chunk_count,
                     "final": final_chunk,
-                    "content": "".join(content_parts),
-                    "thinking": "".join(thinking_parts),
+                    "content_length": len(corrected),
+                    "content_preview": corrected[:2000],
+                    "thinking_length": thinking_length,
+                    "thinking_preview": thinking_preview,
                 }
                 return (
-                    stream_payload["content"],
-                    final_chunk or (chunks[-1] if chunks else {}),
-                    stream_payload["thinking"],
+                    corrected,
+                    final_chunk,
+                    thinking_preview,
                     json.dumps(stream_payload, ensure_ascii=False),
+                    thinking_length,
+                    chunk_count,
                 )
 
             try:
-                corrected_result, payload, thinking, raw_payload = await asyncio.wait_for(
+                corrected_result, payload, thinking, raw_payload, thinking_length, chunk_count = await asyncio.wait_for(
                     read_quality_stream(),
                     timeout=QUALITY_STEP_TIMEOUT_SEC,
                 )
@@ -519,15 +534,15 @@ async def stream_rca_reasoning(
                 eval_count = payload.get("eval_count")
                 total_duration = payload.get("total_duration")
                 content_length = len(corrected_result)
-                thinking_length = len(thinking)
                 logger.warning(
-                    "[QUALITY_RESPONSE] step=%s thinking_length=%s content_length=%s done_reason=%s eval_count=%s total_duration=%s",
+                    "[QUALITY_RESPONSE] step=%s thinking_length=%s content_length=%s done_reason=%s eval_count=%s total_duration=%s chunk_count=%s",
                     verifier_step_label,
                     thinking_length,
                     content_length,
                     done_reason,
                     eval_count,
                     total_duration,
+                    chunk_count,
                 )
                 if not corrected_result.strip():
                     logger.warning(
@@ -546,6 +561,36 @@ async def stream_rca_reasoning(
             except Exception as exc:
                 exc_type = type(exc).__name__
                 exc_msg = str(exc)
+                partial_result = "".join(content_parts)
+                if partial_result.strip():
+                    content_length = len(partial_result)
+                    logger.warning(
+                        "%s optional quality step partial result preserved after %s: %s content_length=%s thinking_length=%s eval_count=%s total_duration=%s chunk_count=%s raw_size=%s",
+                        verifier_step_label,
+                        exc_type,
+                        exc_msg,
+                        content_length,
+                        thinking_length,
+                        eval_count,
+                        total_duration,
+                        chunk_count,
+                        raw_size,
+                        exc_info=True,
+                    )
+                    if isinstance(exc, asyncio.TimeoutError):
+                        warning_text = (
+                            f"{verifier_step_label} Timeout({QUALITY_STEP_TIMEOUT_SEC}s), "
+                            "partial 결과 사용"
+                        )
+                    else:
+                        detail = f"{exc_type}: {exc_msg}"[:300]
+                        warning_text = f"{verifier_step_label} 실패({detail}), partial 결과 사용"
+                    response_parts.append(f"\n\n*({warning_text})*\n\n")
+                    response_parts.append(partial_result)
+                    yield ("sse", f"data: {json.dumps({'warning': warning_text})}\n\n")
+                    yield ("sse", f"data: {json.dumps({'token': partial_result})}\n\n")
+                    yield ("result", partial_result)
+                    return
                 if payload is not None and raw_size == 0:
                     raw_size = len(json.dumps(payload, ensure_ascii=False))
                 logger.warning(
@@ -683,12 +728,13 @@ async def stream_rca_reasoning(
                     )
                     yield f"data: {json.dumps({'token': step_response})}\n\n"
                 else:
+                    core_num_predict = STEP4_NUM_PREDICT if step_index == 3 else BASE_NUM_PREDICT
                     llm_payload = {
                         "model": conv.model or RCA_MODEL,
                         "messages": call_messages,
                         "stream": True,
                         "think": False,
-                        "options": build_core_options(),
+                        "options": build_core_options(num_predict=core_num_predict),
                     }
                     yield prompt_debug_event(step_index + 1, label, llm_payload)
                     try:
@@ -743,7 +789,7 @@ async def stream_rca_reasoning(
                             "messages": retry_messages,
                             "stream": True,
                             "think": False,
-                            "options": build_core_options(),
+                            "options": build_core_options(num_predict=core_num_predict),
                         }
                         yield prompt_debug_event(step_index + 1, f"{label} (Retry)", retry_payload)
                         retry_parts: list[str] = []

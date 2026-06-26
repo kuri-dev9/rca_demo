@@ -8,11 +8,15 @@ RCA 판단, 원인 확정, 조치 확정은 LLM이 수행.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from collections import Counter
 from typing import Any
 
 from app.rca.analyzer import RcaAnalysis
 from app.rca.spec_loader import get_call_type_name
+
+logger = logging.getLogger(__name__)
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -711,22 +715,47 @@ STEP_SYSTEM_PROMPT = """\
 
 
 STEP1_TEMPLATE = """\
-STEP 1: 데이터 정규화
+STEP 1: Evidence Normalization
 
-[입력 통계]의 error_stats 항목마다 아래 항목만 정리한다:
-Interface:
-Message:
-Stage:
-Cause:
-구간:
+[입력 통계]의 error_stats 항목마다 반드시 아래 Markdown key:value 형식으로만 작성한다.
+error_stats 항목 수만큼만 출력하고, 각 항목은 ## Error N으로 시작한다.
 
-STEP1은 정규화기 역할만 수행한다.
-Message/Cause는 입력 데이터에 있는 이름을 그대로 사용한다.
-구간은 Interface 기준 Node Pair만 간단히 작성한다.
-HSS 프로파일 확인, 가입자 문제, 셀 가용성 문제, Subscription 문제, 네트워크 장애 추정, 도메인 분류, 원인 추정, 조치 권고는 작성하지 않는다.
+## Error N
+Call Type: <call_type>
+Interface: <interface>
+Message: <message>
+Stage: <stage>
+Cause: <cause>
+Statistics:
+- Count: <count>
+- Affected IMSI: <affected_imsi_count>
+- Affected MME: <affected_mme_count>
+- Affected eNB: <affected_enb_count>
+Node Pair: <3GPP node pair>
+3GPP Meaning:
+<3GPP 절차상 Cause 발생 의미, 1~2문장>
+RCA Meaning:
+<RCA 분석에서 사용할 수 있는 절차상 의미, 원인 판단 없이 1~2문장>
+Procedure Position:
+<절차 위치>
+Possible Downstream Impact:
+<후속 절차 영향, 원인 단정 없이 1~2문장>
 
-항목 사이는 빈 줄로 구분하고, error_stats 항목 수만큼만 작성한 뒤 종료한다.
-같은 문장을 반복하지 않는다. entity_id, 조치 방향, 상관관계 분석은 작성하지 않는다.
+작성 규칙:
+- 모든 항목은 동일한 key 이름을 사용한다.
+- Message/Cause/Stage/Interface/Call Type/Statistics 값은 입력 데이터 값을 그대로 사용한다.
+- Statistics는 반드시 list 형태로 작성한다.
+- 테이블은 사용하지 않는다.
+- 긴 설명은 피하고 한국어로 작성한다.
+- 생각 과정, 재확인, 망설임 문장은 출력하지 않는다.
+
+STEP1에서 작성하지 않을 내용:
+- 최종 RCA, Root Cause 후보, 도메인 판단, Network/Subscriber/Device 분류
+- 장비 장애 판단, 가입자 문제 단정, 단말 문제 단정
+- 점수, Confidence, 우선순위, 조치 권고, 상관관계 분석
+
+특히 PLMN_not_allowed, Requested_service_option_not_subscribed, Operator_Determined_Barring,
+Synch_failure, Implicitly_detached는 원인으로 단정하지 말고 3GPP 절차상 의미와 후속 영향까지만 설명한다.
 
 [입력 통계]
 {payload}
@@ -735,7 +764,7 @@ HSS 프로파일 확인, 가입자 문제, 셀 가용성 문제, Subscription �
 STEP2_TEMPLATE = """\
 STEP 2: 관찰된 패턴 구조화
 
-[STEP1 결과]와 [입력 Flow 데이터]만 사용해 아래만 판단한다:
+[STEP1 Evidence JSON]과 [입력 Flow 데이터]만 사용해 아래만 판단한다:
 - 동일 Flow 여부 / 독립 이벤트 여부 / Failure Chain 연결 여부
 
 판단 결과를 아래 항목으로만 정리한다:
@@ -743,12 +772,18 @@ STEP 2: 관찰된 패턴 구조화
 2. 독립 그룹 — 단독으로 발생하는 패턴
 3. Failure Chain — [입력 Flow 데이터]의 first_error → last_error 흐름
 
+[STEP1 Evidence JSON]을 기준으로 에러 간 상관관계를 분석한다.
+JSON에 없는 장비, 통계, Cause, Interface를 새로 만들지 않는다.
+3GPP Meaning과 RCA Meaning은 STEP1 Evidence JSON 값을 따른다.
 [입력 Flow 데이터]에 없는 관계는 만들지 않는다.
 RCA 수행, 도메인 후보 생성, 장애 원인 판단, 설정 오류 판단, 프로파일 불일치 판단은 하지 않는다.
 entity_id, 조치 방향은 작성하지 않는다.
 
-[STEP1 결과]
-{step1_result}
+[STEP1 Evidence JSON]
+{step1_evidence_json}
+
+[STEP1 Markdown Fallback]
+{step1_markdown_fallback}
 
 [입력 Flow 데이터]
 {flow_payload}
@@ -901,11 +936,170 @@ RCA 후보
 """
 
 
+_RECORD_HEADER_RE = re.compile(r"^##\s+Error\s+(\d+)\s*$", re.IGNORECASE)
+_KEY_VALUE_RE = re.compile(r"^([^:\n]+):\s*(.*)$")
+_STEP1_FIELD_DEFAULTS = {
+    "error_index": None,
+    "call_type": "",
+    "interface": "",
+    "message": "",
+    "stage": "",
+    "cause": "",
+    "statistics": {
+        "count": None,
+        "affected_imsi": None,
+        "affected_mme": None,
+        "affected_enb": None,
+    },
+    "node_pair": "",
+    "three_gpp_meaning": "",
+    "rca_meaning": "",
+    "procedure_position": "",
+    "possible_downstream_impact": "",
+}
+_STEP1_KEY_MAP = {
+    "call type": "call_type",
+    "interface": "interface",
+    "message": "message",
+    "stage": "stage",
+    "cause": "cause",
+    "node pair": "node_pair",
+    "3gpp meaning": "three_gpp_meaning",
+    "rca meaning": "rca_meaning",
+    "procedure position": "procedure_position",
+    "possible downstream impact": "possible_downstream_impact",
+}
+_STAT_KEY_MAP = {
+    "count": "count",
+    "affected imsi": "affected_imsi",
+    "affected mme": "affected_mme",
+    "affected enb": "affected_enb",
+}
+
+
+def _normalize_record_key(key: str) -> str:
+    key = key.strip().lower()
+    key = re.sub(r"[^0-9a-zA-Z가-힣]+", "_", key)
+    return key.strip("_")
+
+
+def _coerce_int_if_possible(value: str) -> int | str:
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return text
+
+
+def _append_multiline_value(record: dict[str, Any], key: str | None, line: str) -> None:
+    if not key:
+        return
+    previous = record.get(key)
+    line = line.strip()
+    if not line:
+        return
+    if previous:
+        record[key] = f"{previous}\n{line}"
+    else:
+        record[key] = line
+
+
+def parse_key_value_markdown_records(markdown_text: str) -> list[dict[str, Any]]:
+    """
+    Parse Markdown records split by `## Error N` into dictionaries.
+
+    The parser is intentionally tolerant: unknown keys are preserved as
+    normalized snake_case keys, malformed lines are appended to the current
+    multi-line field, and parsing errors are reported by returning an empty
+    list from the STEP1 wrapper instead of interrupting the RCA loop.
+    """
+    records: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    current_key: str | None = None
+    in_statistics = False
+
+    def finish_current() -> None:
+        if current is not None:
+            records.append(current)
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        header = _RECORD_HEADER_RE.match(stripped)
+        if header:
+            finish_current()
+            current = {
+                "error_index": int(header.group(1)),
+                "statistics": {},
+            }
+            current_key = None
+            in_statistics = False
+            continue
+
+        if current is None:
+            continue
+
+        if in_statistics and stripped.startswith("-"):
+            stat_match = _KEY_VALUE_RE.match(stripped.lstrip("-").strip())
+            if stat_match:
+                raw_key, raw_value = stat_match.groups()
+                stat_key = _STAT_KEY_MAP.get(raw_key.strip().lower(), _normalize_record_key(raw_key))
+                current.setdefault("statistics", {})[stat_key] = _coerce_int_if_possible(raw_value)
+            continue
+
+        key_match = _KEY_VALUE_RE.match(stripped)
+        if key_match:
+            raw_key, raw_value = key_match.groups()
+            lookup_key = raw_key.strip().lower()
+            if lookup_key == "statistics":
+                current.setdefault("statistics", {})
+                current_key = None
+                in_statistics = True
+                continue
+
+            normalized_key = _STEP1_KEY_MAP.get(lookup_key, _normalize_record_key(raw_key))
+            current[normalized_key] = _coerce_int_if_possible(raw_value) if raw_value.strip() else ""
+            current_key = normalized_key
+            in_statistics = False
+            continue
+
+        in_statistics = False
+        _append_multiline_value(current, current_key, stripped)
+
+    finish_current()
+    return records
+
+
+def parse_step1_evidence_markdown(markdown_text: str) -> list[dict[str, Any]]:
+    """
+    Convert STEP1 evidence Markdown into normalized JSON-ready records.
+    Failure is non-fatal; callers can fallback to the original Markdown.
+    """
+    try:
+        parsed = parse_key_value_markdown_records(markdown_text)
+        normalized_records: list[dict[str, Any]] = []
+        for record in parsed:
+            normalized = json.loads(json.dumps(_STEP1_FIELD_DEFAULTS))
+            normalized.update({k: v for k, v in record.items() if k != "statistics"})
+            normalized["statistics"].update(record.get("statistics") or {})
+            normalized_records.append(normalized)
+
+        logger.info("STEP1 evidence parse success: records=%s", len(normalized_records))
+        return normalized_records
+    except Exception as exc:
+        logger.warning("STEP1 evidence parse failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+        return []
+
+
 def build_loop_step_messages(
     step_name: str,
     payload: dict[str, Any] | None = None,
     *,
     step1_result: str = "",
+    step1_evidence_json: str = "",
+    step1_markdown_fallback: str = "",
     step2_result: str = "",
     step3_result: str = "",
     device_payload: str = "",
@@ -920,7 +1114,11 @@ def build_loop_step_messages(
         payload_text = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         user_content = template.format(payload=payload_text)
     elif step_name == "step2":
-        user_content = template.format(step1_result=step1_result, flow_payload=flow_payload)
+        user_content = template.format(
+            step1_evidence_json=step1_evidence_json or step1_result,
+            step1_markdown_fallback=step1_markdown_fallback,
+            flow_payload=flow_payload,
+        )
     elif step_name == "step3":
         user_content = template.format(
             step1_result=step1_result,
@@ -986,17 +1184,35 @@ def build_loop_step1_messages(compact_rca_ir: dict[str, Any]) -> list[dict[str, 
 
 def build_loop_step2_messages(
     compact_rca_ir: dict[str, Any],
-    step1_result: str,
+    step1_result: str = "",
+    *,
+    step1_result_markdown: str | None = None,
+    step1_evidence_json: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """
-    STEP2 입력: STEP1 결과 + Top Error Chains/Failure Flow Summary.
+    STEP2 입력: STEP1 Evidence JSON + Top Error Chains/Failure Flow Summary.
     Flow 데이터를 직접 제공해 입력에 없는 관계를 만들지 못하게 한다.
     """
+    step1_markdown = step1_result_markdown if step1_result_markdown is not None else step1_result
+    evidence_records = (
+        step1_evidence_json
+        if step1_evidence_json is not None
+        else parse_step1_evidence_markdown(step1_markdown)
+    )
+    if evidence_records:
+        evidence_text = json.dumps(evidence_records, ensure_ascii=False, indent=2)
+        fallback_markdown = ""
+    else:
+        logger.warning("STEP1 evidence parse returned no records; STEP2 will use Markdown fallback")
+        evidence_text = "[]"
+        fallback_markdown = step1_markdown
+
     error_chains = _get_data(compact_rca_ir, "error_chains", [])
     flow_payload = _format_flow_payload_for_step2(error_chains)
     return build_loop_step_messages(
         "step2",
-        step1_result=step1_result,
+        step1_evidence_json=evidence_text,
+        step1_markdown_fallback=fallback_markdown,
         flow_payload=flow_payload,
     )
 
@@ -1279,7 +1495,13 @@ def build_loop_reasoning_steps(
     if step_index == 0:
         return build_loop_step1_messages(compact_rca_ir)
     if step_index == 1:
-        return build_loop_step2_messages(compact_rca_ir, previous_results[0])
+        step1_result_markdown = previous_results[0]
+        step1_evidence_json = parse_step1_evidence_markdown(step1_result_markdown)
+        return build_loop_step2_messages(
+            compact_rca_ir,
+            step1_result_markdown=step1_result_markdown,
+            step1_evidence_json=step1_evidence_json,
+        )
     if step_index == 2:
         return build_loop_step3_messages(
             compact_rca_ir,

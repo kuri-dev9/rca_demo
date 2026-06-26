@@ -247,6 +247,88 @@ def _format_flow_payload_for_step2(error_chains: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(Flow 데이터 없음)"
 
 
+def _evidence_match_score(evidence: dict[str, Any], chain: dict[str, Any]) -> int:
+    first = chain.get("first_error", {}) or {}
+    last = chain.get("last_error", {}) or {}
+    score = 0
+    if evidence.get("call_type") and evidence.get("call_type") == chain.get("call_type"):
+        score += 1
+    for error in (first, last):
+        if evidence.get("message") and evidence.get("message") == error.get("message"):
+            score += 2
+        if evidence.get("cause") and evidence.get("cause") == error.get("cause"):
+            score += 2
+    return score
+
+
+def _find_step1_evidence_for_chain(
+    evidence_records: list[dict[str, Any]],
+    chain: dict[str, Any],
+) -> dict[str, Any] | None:
+    best_record: dict[str, Any] | None = None
+    best_score = 0
+    for evidence in evidence_records:
+        score = _evidence_match_score(evidence, chain)
+        if score > best_score:
+            best_record = evidence
+            best_score = score
+    return best_record if best_score else None
+
+
+def _format_step2_case_payload(
+    evidence_records: list[dict[str, Any]],
+    error_chains: list[dict[str, Any]],
+) -> str:
+    """STEP2 input grouped as Case N: STEP1 Evidence + Top Error Chain + Failure Flow."""
+    if not error_chains:
+        if evidence_records:
+            lines = []
+            for idx, evidence in enumerate(evidence_records[:8], start=1):
+                evidence_text = json.dumps(evidence, ensure_ascii=False, indent=2)
+                lines.append(
+                    f"## Case {idx}\n"
+                    f"STEP1 Evidence:\n{evidence_text}\n"
+                    "Top Error Chain: (제공되지 않음)\n"
+                    "Failure Flow: (제공되지 않음)"
+                )
+            return "\n\n".join(lines)
+        return "(Case 데이터 없음)"
+
+    flow_rows = _build_failure_flow(error_chains)
+    lines: list[str] = []
+    for idx, chain in enumerate(error_chains[:8], start=1):
+        first = chain.get("first_error", {}) or {}
+        last = chain.get("last_error", {}) or {}
+        chain_text = (
+            f"{chain.get('call_type') or '-'}: "
+            f"{first.get('message') or '-'}({first.get('cause') or '-'}) → "
+            f"{last.get('message') or '-'}({last.get('cause') or '-'}) "
+            f"({chain.get('count', 0)}건)"
+        )
+        flow = flow_rows[idx - 1] if idx - 1 < len(flow_rows) else {}
+        flow_text = (
+            f"{flow.get('call_type', chain.get('call_type') or '-')}: "
+            f"{flow.get('first_message', first.get('message') or '-')}("
+            f"{flow.get('first_cause', first.get('cause') or '-')}) → "
+            f"{flow.get('last_message', last.get('message') or '-')}("
+            f"{flow.get('last_cause', last.get('cause') or '-')}) "
+            f"({flow.get('count', chain.get('count', 0))}건)"
+        )
+        evidence = _find_step1_evidence_for_chain(evidence_records, chain)
+        evidence_text = (
+            json.dumps(evidence, ensure_ascii=False, indent=2)
+            if evidence
+            else "(매칭되는 STEP1 Evidence 없음)"
+        )
+        lines.append(
+            f"## Case {idx}\n"
+            f"STEP1 Evidence:\n{evidence_text}\n"
+            f"Top Error Chain: {chain_text}\n"
+            f"Failure Flow: {flow_text}"
+        )
+    return "\n\n".join(lines)
+
+
 def build_compact_rca_ir(analysis: RcaAnalysis) -> dict[str, Any]:
     """Compact RCA IR used by the LLM reasoning path."""
     stage_counter: Counter[str] = Counter()
@@ -769,31 +851,40 @@ Synch_failure, Implicitly_detached는 원인으로 단정하지 말고 3GPP 절�
 """
 
 STEP2_TEMPLATE = """\
-STEP 2: 관찰된 패턴 구조화
+STEP 2: Observation Synthesis
 
-[STEP1 Evidence JSON]과 [입력 Flow 데이터]만 사용해 아래만 판단한다:
-- 동일 Flow 여부 / 독립 이벤트 여부 / Failure Chain 연결 여부
+아래 [Case Payload]는 STEP1 Evidence, Top Error Chain, Failure Flow를 동일 Error Case 단위로 묶은 입력이다.
+각 Case를 사람이 이해 가능한 관찰 단위로 통합한다.
 
-판단 결과를 아래 항목으로만 정리한다:
-1. 연관 그룹 — [입력 Flow 데이터]에 있는 동일 Flow/Failure Chain으로 연결된 패턴
-2. 독립 그룹 — 단독으로 발생하는 패턴
-3. Failure Chain — [입력 Flow 데이터]의 first_error → last_error 흐름
+각 Case마다 아래 항목을 작성한다:
 
-[STEP1 Evidence JSON]을 기준으로 에러 간 상관관계를 분석한다.
-JSON에 없는 장비, 통계, Cause, Interface를 새로 만들지 않는다.
-3GPP Meaning과 RCA Meaning은 STEP1 Evidence JSON 값을 따른다.
-[입력 Flow 데이터]에 없는 관계는 만들지 않는다.
+## Case N
+Error Chain:
+Observed Flow:
+Procedure Summary:
+Case Observation:
+RCA Hint:
+Unknown:
+
+작성 기준:
+- Error Chain은 Case Payload의 Top Error Chain을 그대로 사용한다.
+- Observed Flow는 Case Payload의 Failure Flow를 그대로 사용한다.
+- Procedure Summary는 STEP1 Evidence의 3GPP Meaning, RCA Meaning, Procedure Position, Possible Downstream Impact를 활용해 2~3문장으로 정리한다.
+- Case Observation은 STEP1 Evidence와 Error Chain을 종합하여 관찰된 사실만 작성한다.
+- RCA Hint는 STEP3가 사용할 핵심 단서만 작성한다. 예: 발생 건수, 후속 절차 실패, 단독 Event, 반복 발생 Pattern.
+- Unknown은 현재 입력만으로 확인할 수 없는 내용을 작성한다.
+
+Flow를 복사 나열하지 말고 Case 단위 Observation으로 통합한다.
+새로운 Error Chain, 새로운 Flow, 새로운 Root Cause를 만들지 않는다.
+입력 데이터에 없는 장비, 통계, Cause, Interface를 새로 만들지 않는다.
 RCA 수행, 도메인 후보 생성, 장애 원인 판단, 설정 오류 판단, 프로파일 불일치 판단은 하지 않는다.
 entity_id, 조치 방향은 작성하지 않는다.
 
-[STEP1 Evidence JSON]
-{step1_evidence_json}
+[Case Payload]
+{flow_payload}
 
 [STEP1 Markdown Fallback]
 {step1_markdown_fallback}
-
-[입력 Flow 데이터]
-{flow_payload}
 """
 
 STEP3_TEMPLATE = """\
@@ -1215,12 +1306,12 @@ def build_loop_step2_messages(
         fallback_markdown = step1_markdown
 
     error_chains = _get_data(compact_rca_ir, "error_chains", [])
-    flow_payload = _format_flow_payload_for_step2(error_chains)
+    case_payload = _format_step2_case_payload(evidence_records or [], error_chains)
     return build_loop_step_messages(
         "step2",
         step1_evidence_json=evidence_text,
         step1_markdown_fallback=fallback_markdown,
-        flow_payload=flow_payload,
+        flow_payload=case_payload,
     )
 
 

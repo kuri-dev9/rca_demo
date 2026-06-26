@@ -733,13 +733,13 @@ Statistics:
 - Affected eNB: <affected_enb_count>
 Node Pair: <3GPP node pair>
 3GPP Meaning:
-<3GPP 절차상 Cause 발생 의미, 1~2문장>
+<Interface + Message + Cause를 함께 고려한 3GPP 절차상 사실, 1~2문장>
 RCA Meaning:
-<RCA 분석에서 사용할 수 있는 절차상 의미, 원인 판단 없이 1~2문장>
+<정상 완료되지 못한 절차 단위의 의미, Message명 반복 없이 1~2문장>
 Procedure Position:
-<절차 위치>
+<Stage 값 복사가 아닌 3GPP Procedure 이름>
 Possible Downstream Impact:
-<후속 절차 영향, 원인 단정 없이 1~2문장>
+<영향받을 수 있는 다음 LTE/EPC 절차 이름과 절차상 영향, 원인 단정 없이 1~2문장>
 
 작성 규칙:
 - 모든 항목은 동일한 key 이름을 사용한다.
@@ -748,6 +748,13 @@ Possible Downstream Impact:
 - 테이블은 사용하지 않는다.
 - 긴 설명은 피하고 한국어로 작성한다.
 - 생각 과정, 재확인, 망설임 문장은 출력하지 않는다.
+
+필드별 작성 기준:
+- 3GPP Meaning은 Cause만 풀이하지 말고 Interface와 Message에서 해당 Cause가 관찰된 절차상 사실을 설명한다.
+- RCA Meaning은 Stage나 Message를 다시 쓰지 말고 Authentication, PDN Connectivity, Create Session, Initial Context Setup처럼 절차 이름으로 어떤 절차가 완료되지 못했는지 설명한다.
+- Procedure Position은 AUTH_REQUEST, NAS_ESM, CREATE_SESSION 같은 Stage 값을 그대로 복사하지 말고 가능한 3GPP Procedure 이름으로 변환한다.
+- Possible Downstream Impact는 "이후 절차"처럼 추상적으로 쓰지 말고 Security Mode, PDN Connectivity, Default Bearer 생성, Initial Context Setup, Attach 완료처럼 다음 절차 이름을 명시한다.
+- 설명은 3GPP 절차상 사실까지만 작성하고, 왜 발생했는지에 대한 원인 추론은 작성하지 않는다.
 
 STEP1에서 작성하지 않을 내용:
 - 최종 RCA, Root Cause 후보, 도메인 판단, Network/Subscriber/Device 분류

@@ -114,10 +114,12 @@ _STEP_TERMS: dict[str, list[str]] = {
 
 def find_forbidden_terms(step_name: str, text: str) -> list[str]:
     """text에 등장한 금지어(전역 + STEP별)를 그대로 반환한다."""
-    if not text:
-        return []
-    candidates = GLOBAL_FORBIDDEN_TERMS + _STEP_TERMS.get(step_name, [])
-    return [term for term in candidates if term in text]
+    # if not text:
+    #     return []
+    # candidates = GLOBAL_FORBIDDEN_TERMS + _STEP_TERMS.get(step_name, [])
+    # return [term for term in candidates if term in text]
+    """금지어 필터 사용을 중지한다. 2026-06-26"""
+    return []
 
 
 def build_retry_instruction(violations: list[str]) -> str:

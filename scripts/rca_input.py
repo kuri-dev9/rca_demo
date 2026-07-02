@@ -27,6 +27,31 @@ MYSQL_ROOT_PASSWORD = os.environ.get("MYSQL_ROOT_PASSWORD", "Mobigen_1234")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "chat_demo")
 MYSQL_SERVICE = os.environ.get("RCA_MYSQL_SERVICE", "mysql")
 
+HELP_EPILOG = """\
+Examples:
+  # 서버 컨테이너에 있는 docs/data/sample.dat를 10,000건 단위로 import
+  ./rca_input.py import-sample --chunk-size 10000
+
+  # 직접 파일 업로드 import
+  ./rca_input.py import-file ../docs/data/sample.dat --chunk-size 10000 --input-name sample.dat
+
+  # 저장된 input 목록 확인
+  ./rca_input.py list
+
+  # input 본문을 사람이 읽을 수 있게 출력
+  ./rca_input.py show 1 --chars 20000
+
+  # 아직 run/step에서 사용하지 않은 input 삭제
+  ./rca_input.py delete 1
+  ./rca_input.py delete-sample
+
+Environment:
+  RCA_API_BASE=http://localhost:18001
+  MYSQL_ROOT_PASSWORD=Mobigen_1234
+  MYSQL_DATABASE=chat_demo
+  RCA_MYSQL_SERVICE=mysql
+"""
+
 
 def mysql_cmd() -> list[str]:
     return [
@@ -38,13 +63,14 @@ def mysql_cmd() -> list[str]:
         "mysql",
         "-uroot",
         f"-p{MYSQL_ROOT_PASSWORD}",
+        "--default-character-set=utf8mb4",
         MYSQL_DATABASE,
     ]
 
 
 def run_mysql(sql: str) -> str:
     proc = subprocess.run(
-        mysql_cmd() + ["-N", "-B"],
+        mysql_cmd() + ["--raw", "--batch", "--skip-column-names"],
         input=sql,
         text=True,
         stdout=subprocess.PIPE,
@@ -158,7 +184,11 @@ SELECT ROW_COUNT();
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RCA input 관리 스크립트")
+    parser = argparse.ArgumentParser(
+        description="RCA input 생성/조회/삭제 스크립트",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=HELP_EPILOG,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("import-sample")
@@ -191,6 +221,10 @@ def main() -> None:
     p = sub.add_parser("delete-sample")
     p.add_argument("--prefix", default="sample.dat")
     p.set_defaults(func=cmd_delete_sample)
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        raise SystemExit(0)
 
     args = parser.parse_args()
     try:

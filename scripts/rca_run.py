@@ -23,6 +23,27 @@ MYSQL_ROOT_PASSWORD = os.environ.get("MYSQL_ROOT_PASSWORD", "Mobigen_1234")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "chat_demo")
 MYSQL_SERVICE = os.environ.get("RCA_MYSQL_SERVICE", "mysql")
 
+HELP_EPILOG = """\
+Examples:
+  # DB에 저장된 input/prompt로 Normal pipeline 실행
+  ./rca_run.py run --input-id 1 --prompt-id 1 --model gemma4:26b
+
+  # 실행 현황 확인
+  ./rca_run.py counts
+  ./rca_run.py list-runs
+  ./rca_run.py list-steps
+  ./rca_run.py show-run 1
+
+  # 결과 Markdown 확인
+  ./rca_run.py show-result 1
+
+Environment:
+  RCA_API_BASE=http://localhost:18001
+  MYSQL_ROOT_PASSWORD=Mobigen_1234
+  MYSQL_DATABASE=chat_demo
+  RCA_MYSQL_SERVICE=mysql
+"""
+
 
 def mysql_cmd() -> list[str]:
     return [
@@ -34,13 +55,14 @@ def mysql_cmd() -> list[str]:
         "mysql",
         "-uroot",
         f"-p{MYSQL_ROOT_PASSWORD}",
+        "--default-character-set=utf8mb4",
         MYSQL_DATABASE,
     ]
 
 
 def run_mysql(sql: str) -> str:
     proc = subprocess.run(
-        mysql_cmd() + ["-N", "-B"],
+        mysql_cmd() + ["--raw", "--batch", "--skip-column-names"],
         input=sql,
         text=True,
         stdout=subprocess.PIPE,
@@ -131,7 +153,11 @@ SELECT 'results', COUNT(*) FROM PR_RCA_RESULT;
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RCA run/result 확인 스크립트")
+    parser = argparse.ArgumentParser(
+        description="RCA pipeline 실행/결과 확인 스크립트",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=HELP_EPILOG,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("run")
@@ -158,6 +184,10 @@ def main() -> None:
 
     p = sub.add_parser("counts")
     p.set_defaults(func=cmd_counts)
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        raise SystemExit(0)
 
     args = parser.parse_args()
     try:

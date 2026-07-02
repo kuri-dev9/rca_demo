@@ -24,6 +24,29 @@ MYSQL_ROOT_PASSWORD = os.environ.get("MYSQL_ROOT_PASSWORD", "Mobigen_1234")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "chat_demo")
 MYSQL_SERVICE = os.environ.get("RCA_MYSQL_SERVICE", "mysql")
 
+HELP_EPILOG = """\
+Examples:
+  # 파일에서 prompt 등록
+  ./rca_prompt.py create --file prompt.md
+
+  # 문자열로 간단 등록
+  ./rca_prompt.py create --text "당신은 LTE/EPC RCA 분석가입니다..."
+
+  # 목록과 본문 확인
+  ./rca_prompt.py list
+  ./rca_prompt.py show 1
+
+  # 수정/삭제
+  ./rca_prompt.py update 1 --file prompt_v2.md
+  ./rca_prompt.py delete 1
+
+Environment:
+  RCA_API_BASE=http://localhost:18001
+  MYSQL_ROOT_PASSWORD=Mobigen_1234
+  MYSQL_DATABASE=chat_demo
+  RCA_MYSQL_SERVICE=mysql
+"""
+
 
 def mysql_cmd() -> list[str]:
     return [
@@ -35,13 +58,14 @@ def mysql_cmd() -> list[str]:
         "mysql",
         "-uroot",
         f"-p{MYSQL_ROOT_PASSWORD}",
+        "--default-character-set=utf8mb4",
         MYSQL_DATABASE,
     ]
 
 
 def run_mysql(sql: str) -> str:
     proc = subprocess.run(
-        mysql_cmd() + ["-N", "-B"],
+        mysql_cmd() + ["--raw", "--batch", "--skip-column-names"],
         input=sql,
         text=True,
         stdout=subprocess.PIPE,
@@ -129,7 +153,11 @@ def cmd_delete(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RCA prompt 관리 스크립트")
+    parser = argparse.ArgumentParser(
+        description="RCA prompt 등록/조회/수정/삭제 스크립트",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=HELP_EPILOG,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("create")
@@ -155,6 +183,10 @@ def main() -> None:
     p = sub.add_parser("delete")
     p.add_argument("prompt_id", type=int)
     p.set_defaults(func=cmd_delete)
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        raise SystemExit(0)
 
     args = parser.parse_args()
     args.func(args)

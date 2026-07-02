@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "mysql+aiomysql://root:Mobigen_1234@localhost:3306/chat_demo"
+    database_url: str = "mysql+aiomysql://root:Mobigen_1234@localhost:3306/chat_demo?charset=utf8mb4"
     ollama_base_url: str = "http://localhost:11434"
     anthropic_api_key: str = ""
     google_api_key: str = ""

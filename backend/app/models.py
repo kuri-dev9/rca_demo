@@ -1,9 +1,12 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Text, DateTime, ForeignKey, JSON, func
+from sqlalchemy import BigInteger, Float, String, Text, DateTime, ForeignKey, JSON, func
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+LONG_TEXT = Text().with_variant(mysql.LONGTEXT, "mysql")
 
 
 class Conversation(Base):
@@ -63,3 +66,76 @@ class KnowledgeDocument(Base):
     status: Mapped[str] = mapped_column(String(20), default="processing")  # processing, ready, error
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class RcaInput(Base):
+    __tablename__ = "PR_RCA_INPUT"
+
+    input_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    input_name: Mapped[str] = mapped_column(String(255), default="")
+    text: Mapped[str] = mapped_column(LONG_TEXT)
+    hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    priority: Mapped[int] = mapped_column(default=0)
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RcaPrompt(Base):
+    __tablename__ = "PR_RCA_PROMPT"
+
+    prompt_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(LONG_TEXT)
+    hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    priority: Mapped[int] = mapped_column(default=0)
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RcaRun(Base):
+    __tablename__ = "PR_RCA_RUN"
+
+    run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_mode: Mapped[str] = mapped_column(String(20))
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    steps: Mapped[list["RcaStep"]] = relationship(back_populates="run")
+
+
+class RcaResult(Base):
+    __tablename__ = "PR_RCA_RESULT"
+
+    result_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(LONG_TEXT)
+    hallucination_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    over_confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evidence_missing_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    domain_bias_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evaluation_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(default=0)
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RcaStep(Base):
+    __tablename__ = "PR_RCA_STEP"
+
+    step_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    step_type: Mapped[str] = mapped_column(String(50))
+    run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("PR_RCA_RUN.run_id", ondelete="CASCADE"))
+    input_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("PR_RCA_INPUT.input_id"))
+    prompt_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("PR_RCA_PROMPT.prompt_id"))
+    result_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("PR_RCA_RESULT.result_id"), nullable=True)
+    priority: Mapped[int] = mapped_column(default=0)
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    run: Mapped["RcaRun"] = relationship(back_populates="steps")
+    input: Mapped["RcaInput"] = relationship()
+    prompt: Mapped["RcaPrompt"] = relationship()
+    result: Mapped[Optional["RcaResult"]] = relationship()

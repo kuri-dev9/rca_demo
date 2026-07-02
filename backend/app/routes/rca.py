@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -25,7 +26,8 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import get_db
-from app.models import Conversation, Message
+from app.models import Conversation, Message, RcaInput, RcaPrompt, RcaResult, RcaRun, RcaStep
+from app.schemas import RcaPromptCreate, RcaPromptResponse, RcaRunNormalRequest, RcaRunNormalResponse
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
 from app.rca.claude_verifier import (
@@ -99,6 +101,61 @@ def _sample_file_path() -> Path:
         if path and path.exists():
             return path
     return Path.cwd() / "docs" / "data" / "sample.dat"
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def _get_or_create_rca_input(
+    db: AsyncSession,
+    *,
+    input_name: str,
+    text: str,
+    priority: int = 0,
+) -> tuple[RcaInput, bool]:
+    text_hash = _sha256_text(text)
+    existing = await db.scalar(select(RcaInput).where(RcaInput.hash == text_hash))
+    if existing:
+        return existing, False
+    row = RcaInput(
+        input_name=input_name,
+        text=text,
+        hash=text_hash,
+        priority=priority,
+    )
+    db.add(row)
+    await db.flush()
+    return row, True
+
+
+async def _get_or_create_rca_prompt(
+    db: AsyncSession,
+    *,
+    text: str,
+    priority: int = 0,
+) -> tuple[RcaPrompt, bool]:
+    text_hash = _sha256_text(text)
+    existing = await db.scalar(select(RcaPrompt).where(RcaPrompt.hash == text_hash))
+    if existing:
+        return existing, False
+    row = RcaPrompt(text=text, hash=text_hash, priority=priority)
+    db.add(row)
+    await db.flush()
+    return row, True
+
+
+def _extract_chat_content(payload: dict[str, Any]) -> str:
+    message = payload.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if content:
+            return str(content)
+    for key in ("response", "content"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
 
 
 def _rss_mb() -> float:
@@ -277,6 +334,225 @@ async def analyze_xdr(
                 pass
 
 
+async def _import_rca_inputs_from_path(
+    *,
+    filepath: str,
+    filename: str,
+    chunk_size: int,
+    input_name: str | None,
+    priority: int,
+    model: str,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    if chunk_size <= 0:
+        raise HTTPException(status_code=422, detail="chunk_size는 1 이상이어야 합니다")
+
+    records = analysis = compact_rca_ir = None
+    created_ids: list[int] = []
+    existing_ids: list[int] = []
+    try:
+        records, parse_stats = await asyncio.to_thread(parse_file, filepath)
+        parsed = int(parse_stats.get("parsed") or 0)
+        if parsed <= 0:
+            raise HTTPException(status_code=422, detail="파싱 가능한 레코드가 없습니다")
+
+        for chunk_index, start in enumerate(range(0, parsed, chunk_size), start=1):
+            current_size = min(chunk_size, parsed - start)
+            chunk_records = records.slice(start, current_size)
+            chunk_stats = {
+                **parse_stats,
+                "parsed": current_size,
+                "raw_rows": current_size,
+                "chunk_index": chunk_index,
+                "chunk_start": start,
+                "chunk_size": current_size,
+            }
+            analysis = await asyncio.to_thread(analyze, chunk_records, chunk_stats)
+            compact_rca_ir = build_compact_rca_ir(analysis)
+            messages = build_rca_messages({"compact_rca_ir": compact_rca_ir}, model or RCA_MODEL)
+            user_content = messages[-1]["content"]
+            chunk_name = input_name or filename
+            row, created = await _get_or_create_rca_input(
+                db,
+                input_name=f"{chunk_name} #{chunk_index:04d}",
+                text=user_content,
+                priority=priority,
+            )
+            if created:
+                created_ids.append(row.input_id)
+            else:
+                existing_ids.append(row.input_id)
+
+        await db.commit()
+        return {
+            "success": True,
+            "created_count": len(created_ids),
+            "existing_count": len(existing_ids),
+            "input_ids": created_ids,
+            "existing_input_ids": existing_ids,
+            "total_records": parsed,
+            "chunk_size": chunk_size,
+        }
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"RCA input import 실패: {exc}") from exc
+    finally:
+        del records, analysis, compact_rca_ir
+        gc.collect()
+
+
+@router.post("/input/import")
+async def import_rca_input(
+    file: UploadFile = File(...),
+    chunk_size: int = Form(10000),
+    input_name: str | None = Form(None),
+    priority: int = Form(0),
+    model: str = Form(RCA_MODEL),
+    db: AsyncSession = Depends(get_db),
+):
+    if not file.filename or not file.filename.lower().endswith(".dat"):
+        raise HTTPException(status_code=422, detail="xDR .dat 파일만 지원합니다")
+
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as tmp:
+            tmp_path = tmp.name
+            total_size = 0
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > RCA_MAX_FILE_BYTES:
+                    raise HTTPException(status_code=413, detail="파일 크기 제한(500MB) 초과")
+                tmp.write(chunk)
+        return await _import_rca_inputs_from_path(
+            filepath=tmp_path,
+            filename=file.filename,
+            chunk_size=chunk_size,
+            input_name=input_name,
+            priority=priority,
+            model=model or RCA_MODEL,
+            db=db,
+        )
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+@router.post("/input/import/sample")
+async def import_sample_rca_input(
+    chunk_size: int = Form(10000),
+    input_name: str | None = Form(None),
+    priority: int = Form(0),
+    model: str = Form(RCA_MODEL),
+    db: AsyncSession = Depends(get_db),
+):
+    sample_file_path = _sample_file_path()
+    if not sample_file_path.exists():
+        raise HTTPException(status_code=404, detail="sample file not found")
+    return await _import_rca_inputs_from_path(
+        filepath=str(sample_file_path),
+        filename=sample_file_path.name,
+        chunk_size=chunk_size,
+        input_name=input_name,
+        priority=priority,
+        model=model or RCA_MODEL,
+        db=db,
+    )
+
+
+@router.post("/prompt", response_model=RcaPromptResponse)
+async def create_rca_prompt(
+    payload: RcaPromptCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    prompt_text = payload.text.strip()
+    if not prompt_text:
+        raise HTTPException(status_code=422, detail="Prompt text가 비어 있습니다")
+    prompt, _created = await _get_or_create_rca_prompt(
+        db,
+        text=prompt_text,
+        priority=payload.priority,
+    )
+    await db.commit()
+    await db.refresh(prompt)
+    return prompt
+
+
+@router.post("/run/normal", response_model=RcaRunNormalResponse)
+async def run_normal_rca_experiment(
+    payload: RcaRunNormalRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    rca_input = await db.scalar(select(RcaInput).where(RcaInput.input_id == payload.input_id))
+    if not rca_input:
+        raise HTTPException(status_code=404, detail="RCA input을 찾을 수 없습니다")
+    rca_prompt = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == payload.prompt_id))
+    if not rca_prompt:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+
+    run = RcaRun(run_mode="NORMAL")
+    db.add(run)
+    await db.flush()
+    step = RcaStep(
+        step_type="NORMAL",
+        run_id=run.run_id,
+        input_id=rca_input.input_id,
+        prompt_id=rca_prompt.prompt_id,
+        priority=payload.priority,
+    )
+    db.add(step)
+    await db.flush()
+
+    messages = [
+        {"role": "system", "content": rca_prompt.text},
+        {"role": "user", "content": rca_input.text},
+    ]
+    llm_payload = {
+        "model": payload.model or RCA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "options": build_core_options(num_predict=STEP4_NUM_PREDICT),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                f"{settings.ollama_base_url}/api/chat",
+                json=llm_payload,
+            )
+            response.raise_for_status()
+            result_text = _extract_chat_content(response.json())
+        if not result_text.strip():
+            raise HTTPException(status_code=502, detail="LLM 응답이 비어 있습니다")
+
+        result_row = RcaResult(text=result_text, priority=payload.priority)
+        db.add(result_row)
+        await db.flush()
+        step.result_id = result_row.result_id
+        await db.commit()
+        return RcaRunNormalResponse(
+            success=True,
+            run_id=run.run_id,
+            step_id=step.step_id,
+            result_id=result_row.result_id,
+        )
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"RCA normal run 실패: {exc}") from exc
+
+
 @sample_router.post("/sample")
 async def analyze_sample_xdr(
     model: str = Form(RCA_MODEL),
@@ -318,6 +594,33 @@ async def stream_rca_report(
     else:
         messages = build_rca_messages(context, conv.model or RCA_MODEL)
 
+    input_row, _input_created = await _get_or_create_rca_input(
+        db,
+        input_name=f"conversation:{conv_id}:report",
+        text=messages[-1]["content"],
+    )
+    prompt_row, _prompt_created = await _get_or_create_rca_prompt(
+        db,
+        text=messages[0]["content"],
+    )
+    run_row = RcaRun(
+        run_mode="LOOP" if isinstance(context, dict) and context.get("rca_loop_mode") else "NORMAL"
+    )
+    db.add(run_row)
+    await db.flush()
+    step_row = RcaStep(
+        step_type="REPORT" if rca_reasoning else "NORMAL",
+        run_id=run_row.run_id,
+        input_id=input_row.input_id,
+        prompt_id=prompt_row.prompt_id,
+    )
+    db.add(step_row)
+    await db.commit()
+    messages = [
+        {"role": "system", "content": prompt_row.text},
+        {"role": "user", "content": input_row.text},
+    ]
+
     logger.debug("rca report prompt chars=%s", sum(len(m["content"]) for m in messages))
 
     async def generate():
@@ -358,6 +661,10 @@ async def stream_rca_report(
         # assistant 메시지 저장
         full_response = "".join(response_parts)
         if full_response.strip():
+            result_row = RcaResult(text=full_response)
+            db.add(result_row)
+            await db.flush()
+            step_row.result_id = result_row.result_id
             msg_obj = Message(
                 conversation_id=conv_id,
                 role="assistant",

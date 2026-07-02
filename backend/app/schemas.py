@@ -89,3 +89,31 @@ class ConversationImport(BaseModel):
     model: str = "gemma4:26b"
     system_prompt: str | None = None
     messages: list[MessageBase] = []
+
+
+class RcaPromptCreate(BaseModel):
+    text: str
+    priority: int = 0
+
+
+class RcaPromptResponse(BaseModel):
+    prompt_id: int
+    hash: str
+    priority: int
+
+    class Config:
+        from_attributes = True
+
+
+class RcaRunNormalRequest(BaseModel):
+    input_id: int
+    prompt_id: int
+    model: str = "gemma4:26b"
+    priority: int = 0
+
+
+class RcaRunNormalResponse(BaseModel):
+    success: bool
+    run_id: int
+    step_id: int
+    result_id: int

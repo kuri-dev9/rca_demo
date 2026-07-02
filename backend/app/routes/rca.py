@@ -369,13 +369,12 @@ async def _import_rca_inputs_from_path(
             }
             analysis = await asyncio.to_thread(analyze, chunk_records, chunk_stats)
             compact_rca_ir = build_compact_rca_ir(analysis)
-            messages = build_rca_messages({"compact_rca_ir": compact_rca_ir}, model or RCA_MODEL)
-            user_content = messages[-1]["content"]
+            input_text = _ir_to_markdown(compact_rca_ir)
             chunk_name = input_name or filename
             row, created = await _get_or_create_rca_input(
                 db,
                 input_name=f"{chunk_name} #{chunk_index:04d}",
-                text=user_content,
+                text=input_text,
                 priority=priority,
             )
             if created:

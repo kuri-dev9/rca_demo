@@ -1095,7 +1095,11 @@ async def stream_rca_reasoning(
                     )
                     yield f"data: {json.dumps({'token': step_response})}\n\n"
                 else:
-                    core_num_predict = STEP4_NUM_PREDICT if step_index == 3 else BASE_NUM_PREDICT
+                    core_num_predict = (
+                        STEP4_NUM_PREDICT if loop_mode and step_index == 3
+                        else BASE_NUM_PREDICT if loop_mode
+                        else NORMAL_RUN_NUM_PREDICT
+                    )
                     llm_payload = {
                         "model": conv.model or RCA_MODEL,
                         "messages": call_messages,

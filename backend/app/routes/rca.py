@@ -63,6 +63,7 @@ RCA_MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 QUALITY_STEP_TIMEOUT_SEC = 300.0
 BASE_NUM_PREDICT = 1024
 STEP4_NUM_PREDICT = 2048
+NORMAL_RUN_NUM_PREDICT = 4096
 STEP2A_NUM_PREDICT_MULTIPLIER = 4
 STEP3A_NUM_PREDICT_MULTIPLIER = 4
 QUALITY_THINKING_LOG_LIMIT = 2000
@@ -519,7 +520,7 @@ async def run_normal_rca_experiment(
         "messages": messages,
         "stream": False,
         "think": False,
-        "options": build_core_options(num_predict=STEP4_NUM_PREDICT),
+        "options": build_core_options(num_predict=NORMAL_RUN_NUM_PREDICT),
     }
 
     try:

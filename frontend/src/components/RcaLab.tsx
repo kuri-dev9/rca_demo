@@ -209,7 +209,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
         );
         setExperimentStatus('SCORING');
         setExperimentProgress(Math.round(((i + 1) / experimentCount) * 100));
-        setExperimentProgressText(`${i + 1} / ${experimentCount} AI Judge 반영`);
+        setExperimentProgressText(`${i + 1} / ${experimentCount} LOCAL / CLAUDE Judge 반영`);
         await refreshAll();
       }
       setExperimentStatus('COMPLETED');
@@ -226,7 +226,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
           compareModel || undefined,
         ));
       }
-      setMessage('Experiment 실행과 AI Judge 평가가 완료되었습니다.');
+      setMessage('Experiment 실행과 LOCAL / CLAUDE Judge 평가가 완료되었습니다.');
     } catch (err: any) {
       setExperimentStatus('FAILED');
       setExperimentProgressText('FAILED');
@@ -313,7 +313,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
           ['experiments', 'Experiment 실행'],
           ['results', 'Result 비교'],
           ['meta', 'Meta Analyzer'],
-          ['human', '평가 / Human Override'],
+          ['human', 'Judge Center'],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -687,7 +687,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
       {tab === 'human' && (
         <section className="rca-lab-grid">
           <div className="rca-lab-panel wide">
-            <h2>평가 화면</h2>
+            <h2>Judge Center</h2>
             <label>Result</label>
             <select
               value={selectedResult?.result_id || defaultResultId}
@@ -776,7 +776,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
           </div>
           <div className="rca-lab-panel">
             <h2>Human Override</h2>
-            <p className="rca-lab-help">AI Judge 이후 사람이 추가로 남기는 평가입니다. LOCAL/GPT/CLAUDE/GEMINI/HUMAN Judge 비교 구조에 함께 저장됩니다.</p>
+            <p className="rca-lab-help">LOCAL Judge와 CLAUDE Judge 이후 사람이 선택적으로 남기는 평가입니다. 향후 GPT/GEMINI/DeepSeek Judge도 같은 구조에 저장할 수 있습니다.</p>
             <label>평가</label>
             <div className="rca-lab-rating">
               {['GOOD', 'NORMAL', 'BAD'].map((rating) => (

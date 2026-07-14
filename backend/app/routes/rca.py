@@ -239,6 +239,67 @@ def _score_summary(results: list[RcaResult]) -> dict[str, Any]:
     }
 
 
+def _score_summary_from_payloads(score_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total_scores = [
+        _avg([
+            _safe_float(row.get("accuracy_score")),
+            _safe_float(row.get("reasoning_score")),
+            _safe_float(row.get("evidence_score")),
+            _safe_float(row.get("actionability_score")),
+        ])
+        for row in score_rows
+    ]
+    return {
+        "execution_count": len(score_rows),
+        "average_score": _avg(total_scores),
+        "best_score": max([score for score in total_scores if score is not None], default=None),
+        "worst_score": min([score for score in total_scores if score is not None], default=None),
+        "recent_10_average": _avg(total_scores[:10]),
+        "recent_50_average": _avg(total_scores[:50]),
+        "accuracy_average": _avg([_safe_float(row.get("accuracy_score")) for row in score_rows]),
+        "reasoning_average": _avg([_safe_float(row.get("reasoning_score")) for row in score_rows]),
+        "evidence_average": _avg([_safe_float(row.get("evidence_score")) for row in score_rows]),
+        "actionability_average": _avg([_safe_float(row.get("actionability_score")) for row in score_rows]),
+    }
+
+
+async def _preferred_score_summary(db: AsyncSession, results: list[RcaResult]) -> dict[str, Any]:
+    if not results:
+        return _score_summary_from_payloads([])
+    result_ids = [result.result_id for result in results]
+    judges = (
+        await db.execute(
+            select(RcaJudge)
+            .where(RcaJudge.result_id.in_(result_ids))
+            .where(RcaJudge.status == "SUCCESS")
+            .where(RcaJudge.judge_type.in_(["CLAUDE", "LOCAL"]))
+            .order_by(RcaJudge.judge_id.desc())
+        )
+    ).scalars().all()
+    grouped: dict[int, dict[str, RcaJudge]] = {}
+    for judge in judges:
+        grouped.setdefault(judge.result_id, {}).setdefault(judge.judge_type, judge)
+
+    score_rows: list[dict[str, Any]] = []
+    for result in results:
+        preferred = grouped.get(result.result_id, {}).get("CLAUDE") or grouped.get(result.result_id, {}).get("LOCAL")
+        if preferred:
+            score_rows.append({
+                "accuracy_score": preferred.accuracy_score,
+                "reasoning_score": preferred.reasoning_score,
+                "evidence_score": preferred.evidence_score,
+                "actionability_score": preferred.actionability_score,
+            })
+        else:
+            score_rows.append({
+                "accuracy_score": result.accuracy_score,
+                "reasoning_score": result.reasoning_score,
+                "evidence_score": result.evidence_score,
+                "actionability_score": result.actionability_score,
+            })
+    return _score_summary_from_payloads(score_rows)
+
+
 def _human_score(rating: str) -> float | None:
     normalized = rating.upper()
     if normalized == "GOOD":
@@ -434,6 +495,188 @@ async def _apply_local_ai_judge(
                 status="FAILED",
                 judge_comment=f"{type(exc).__name__}: {exc}"[:2000],
                 evaluator=model or RCA_MODEL,
+            )
+        )
+
+
+def _parse_judge_json(raw_content: str) -> dict[str, Any]:
+    try:
+        return json.loads(raw_content)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw_content, re.S)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _apply_judge_scores_to_result(result_row: RcaResult, parsed: dict[str, Any]) -> dict[str, Any]:
+    accuracy_score = _safe_float(parsed.get("accuracy_score"))
+    reasoning_score = _safe_float(parsed.get("reasoning_score"))
+    evidence_score = _safe_float(parsed.get("evidence_score"))
+    actionability_score = _safe_float(parsed.get("actionability_score"))
+    total_score = _avg([accuracy_score, reasoning_score, evidence_score, actionability_score])
+    result_row.accuracy_score = accuracy_score
+    result_row.reasoning_score = reasoning_score
+    result_row.evidence_score = evidence_score
+    result_row.actionability_score = actionability_score
+    result_row.accuracy_comment = str(parsed.get("accuracy_comment") or "")[:2000] or None
+    result_row.reasoning_comment = str(parsed.get("reasoning_comment") or "")[:2000] or None
+    result_row.evidence_comment = str(parsed.get("evidence_comment") or "")[:2000] or None
+    result_row.actionability_comment = str(parsed.get("actionability_comment") or "")[:2000] or None
+    result_row.evaluation_comment = str(
+        parsed.get("overall_comment")
+        or parsed.get("judge_comment")
+        or parsed.get("improvement_points")
+        or ""
+    )[:2000] or None
+    return {
+        "total_score": total_score,
+        "accuracy_score": accuracy_score,
+        "reasoning_score": reasoning_score,
+        "evidence_score": evidence_score,
+        "actionability_score": actionability_score,
+        "accuracy_comment": result_row.accuracy_comment,
+        "reasoning_comment": result_row.reasoning_comment,
+        "evidence_comment": result_row.evidence_comment,
+        "actionability_comment": result_row.actionability_comment,
+        "judge_comment": result_row.evaluation_comment,
+    }
+
+
+async def _apply_claude_ai_judge(
+    db: AsyncSession,
+    *,
+    result_row: RcaResult,
+    rca_input: RcaInput,
+    rca_prompt: RcaPrompt,
+) -> None:
+    if not settings.anthropic_api_key:
+        db.add(
+            RcaJudge(
+                result_id=result_row.result_id,
+                judge_type="CLAUDE",
+                status="FAILED",
+                judge_comment="anthropic_api_key가 설정되어 있지 않습니다",
+                evaluator=CLAUDE_VERIFIER_MODEL,
+            )
+        )
+        return
+
+    try:
+        from anthropic import AsyncAnthropic
+    except Exception as exc:
+        db.add(
+            RcaJudge(
+                result_id=result_row.result_id,
+                judge_type="CLAUDE",
+                status="FAILED",
+                judge_comment=f"anthropic 패키지를 불러올 수 없습니다: {exc}"[:2000],
+                evaluator=CLAUDE_VERIFIER_MODEL,
+            )
+        )
+        return
+
+    system_prompt = (
+        "당신은 LTE/5G RCA 검증 전문가입니다. RCA를 새로 생성하지 말고 평가만 수행합니다. "
+        "입력 데이터, 실행 Prompt, RCA 결과를 모두 참조하여 실제 RCA 품질 기준으로 냉정하게 평가합니다. "
+        "반드시 JSON만 출력합니다."
+    )
+    user_prompt = f"""다음 정보를 참고하여 RCA 결과를 평가하라.
+
+[INPUT]
+{_truncate_text(rca_input.text or "", 14000)}
+
+[PROMPT]
+{_truncate_text(rca_prompt.text or "", 8000)}
+
+[RCA RESULT]
+{_truncate_text(result_row.text or "", 14000)}
+
+다음 항목을 0~100점으로 평가하라.
+1. Accuracy
+2. Reasoning
+3. Evidence
+4. Actionability
+
+추가로 작성하라.
+- 좋은 점
+- 개선할 점
+- 치명적인 문제
+
+절대 관대하게 평가하지 말고 실제 RCA 품질 기준으로 냉정하게 평가하라.
+
+JSON schema:
+{{
+  "accuracy_score": 0,
+  "accuracy_comment": "",
+  "reasoning_score": 0,
+  "reasoning_comment": "",
+  "evidence_score": 0,
+  "evidence_comment": "",
+  "actionability_score": 0,
+  "actionability_comment": "",
+  "good_points": "",
+  "improvement_points": "",
+  "critical_issues": "",
+  "overall_comment": ""
+}}
+"""
+    try:
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key, timeout=90.0)
+        response = await client.messages.create(
+            model=CLAUDE_VERIFIER_MODEL,
+            max_tokens=1600,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw_content = "".join(
+            block.text for block in response.content
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+        )
+        if not raw_content.strip():
+            raise ValueError("Claude Judge 응답이 비어 있습니다")
+        parsed = _parse_judge_json(raw_content)
+        score_payload = _apply_judge_scores_to_result(result_row, parsed)
+        good_points = str(parsed.get("good_points") or "").strip()
+        improvement_points = str(parsed.get("improvement_points") or "").strip()
+        critical_issues = str(parsed.get("critical_issues") or "").strip()
+        judge_comment = "\n".join(
+            part for part in [
+                score_payload["judge_comment"],
+                f"좋은 점: {good_points}" if good_points else "",
+                f"개선할 점: {improvement_points}" if improvement_points else "",
+                f"치명적인 문제: {critical_issues}" if critical_issues else "",
+            ]
+            if part
+        )[:4000] or None
+        db.add(
+            RcaJudge(
+                result_id=result_row.result_id,
+                judge_type="CLAUDE",
+                status="SUCCESS",
+                total_score=score_payload["total_score"],
+                accuracy_score=score_payload["accuracy_score"],
+                reasoning_score=score_payload["reasoning_score"],
+                evidence_score=score_payload["evidence_score"],
+                actionability_score=score_payload["actionability_score"],
+                accuracy_comment=score_payload["accuracy_comment"],
+                reasoning_comment=score_payload["reasoning_comment"],
+                evidence_comment=score_payload["evidence_comment"],
+                actionability_comment=score_payload["actionability_comment"],
+                judge_comment=judge_comment,
+                raw_response=raw_content,
+                evaluator=CLAUDE_VERIFIER_MODEL,
+            )
+        )
+    except Exception as exc:
+        logger.warning("CLAUDE AI Judge failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+        db.add(
+            RcaJudge(
+                result_id=result_row.result_id,
+                judge_type="CLAUDE",
+                status="FAILED",
+                judge_comment=f"{type(exc).__name__}: {exc}"[:2000],
+                evaluator=CLAUDE_VERIFIER_MODEL,
             )
         )
 
@@ -824,6 +1067,12 @@ async def run_normal_rca_experiment(
             rca_prompt=rca_prompt,
             model=payload.model or RCA_MODEL,
         )
+        await _apply_claude_ai_judge(
+            db,
+            result_row=result_row,
+            rca_input=rca_input,
+            rca_prompt=rca_prompt,
+        )
         await db.commit()
         return RcaRunNormalResponse(
             success=True,
@@ -924,7 +1173,7 @@ async def list_rca_lab_prompts(db: AsyncSession = Depends(get_db)):
             )
         ).all()
         result_rows = [result for _step, result in steps if result is not None]
-        stats = _score_summary(result_rows)
+        stats = await _preferred_score_summary(db, result_rows)
         items.append({
             "prompt_id": prompt.prompt_id,
             "prompt_name": f"PROMPT_{prompt.prompt_id:04d}",
@@ -1016,7 +1265,7 @@ async def get_rca_lab_prompt_stats(
         raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
     rows = await _prompt_result_rows(db, prompt_id, input_id=input_id, model=model)
     results = [result for _step, _run, result in rows]
-    stats = _score_summary(results)
+    stats = await _preferred_score_summary(db, results)
     human_summary = await _prompt_human_summary(db, [result.result_id for result in results])
     if stats["average_score"] is not None and human_summary["human_average_score"] is not None:
         human_summary["ai_human_gap"] = round(human_summary["human_average_score"] - stats["average_score"], 2)
@@ -1058,7 +1307,7 @@ async def analyze_rca_lab_prompt(
         raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
     rows = await _prompt_result_rows(db, prompt_id)
     results = [result for _step, _run, result in rows]
-    stats = _score_summary(results)
+    stats = await _preferred_score_summary(db, results)
     comments = _comment_frequency(results)
     analysis = _build_meta_analysis(stats, comments)
     return {
@@ -1089,8 +1338,8 @@ async def compare_rca_lab_prompts(
 
     left_results = [result for _step, _run, result in await _prompt_result_rows(db, left_prompt_id, input_id=input_id, model=model)]
     right_results = [result for _step, _run, result in await _prompt_result_rows(db, right_prompt_id, input_id=input_id, model=model)]
-    left_stats = _score_summary(left_results)
-    right_stats = _score_summary(right_results)
+    left_stats = await _preferred_score_summary(db, left_results)
+    right_stats = await _preferred_score_summary(db, right_results)
     metric_map = {
         "total_score": ("average_score", "Total Score"),
         "accuracy": ("accuracy_average", "Accuracy"),
@@ -1158,7 +1407,7 @@ async def list_rca_lab_prompt_performance(
     output = []
     for item in grouped.values():
         results = item.pop("results")
-        output.append({**item, **_score_summary(results)})
+        output.append({**item, **await _preferred_score_summary(db, results)})
     return sorted(output, key=lambda row: row.get("average_score") or -1, reverse=True)
 
 

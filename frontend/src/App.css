@@ -133,6 +133,28 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sidebar-toggle-btn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.sidebar-toggle-btn:hover {
+  background: var(--hover);
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -275,6 +297,13 @@ body {
   font-weight: 650;
 }
 
+.rca-lab h3 {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+
 .rca-lab label {
   color: var(--text-secondary);
   font-size: 12px;
@@ -323,6 +352,12 @@ body {
   font-weight: 600;
 }
 
+.rca-lab-table.compact th,
+.rca-lab-table.compact td {
+  padding: 7px 6px;
+  font-size: 12px;
+}
+
 .rca-lab-actions {
   display: flex;
   gap: 6px;
@@ -348,6 +383,176 @@ body {
 .rca-lab-rating {
   display: flex;
   gap: 8px;
+}
+
+.rca-progress-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--input-bg);
+}
+
+.rca-progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.rca-progress-bar {
+  width: 100%;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.rca-progress-bar div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.rca-progress-card small {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+
+.rca-lab-help {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rca-evaluation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rca-eval-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  overflow: hidden;
+}
+
+.rca-eval-section-title {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  display: flex;
+  justify-content: space-between;
+  background: var(--bg-secondary);
+  font-weight: 650;
+  text-align: left;
+}
+
+.rca-eval-section-body {
+  padding: 12px;
+}
+
+.rca-eval-section-body pre {
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--bg-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rca-eval-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.rca-eval-meta span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.rca-eval-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rca-eval-comments p {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 10px;
+  margin: 0;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.rca-lab-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.rca-lab-metrics div {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px;
+  background: var(--input-bg);
+}
+
+.rca-lab-metrics span {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.rca-lab-metrics strong {
+  font-size: 18px;
+}
+
+.rca-lab-comment-box,
+.rca-lab-analysis {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--input-bg);
+}
+
+.rca-lab-comment-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding: 7px 0;
+  font-size: 12px;
+}
+
+.rca-lab-comment-row:first-of-type {
+  border-top: 0;
+}
+
+.rca-lab-analysis ul {
+  padding-left: 18px;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.rca-lab-analysis p {
+  line-height: 1.5;
+  font-size: 13px;
 }
 
 .model-selector {

@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS PR_RCA_PROMPT (
 CREATE TABLE IF NOT EXISTS PR_RCA_RUN (
     run_id BIGINT NOT NULL AUTO_INCREMENT,
     run_mode VARCHAR(20) NOT NULL,
+    model VARCHAR(100) NULL,
     update_dt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (run_id),
+    KEY idx_pr_rca_run_model (model),
     KEY idx_pr_rca_run_mode (run_mode),
     KEY idx_pr_rca_run_update_dt (update_dt)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -103,4 +105,30 @@ CREATE TABLE IF NOT EXISTS PR_RCA_HUMAN_EVAL (
         ON DELETE CASCADE,
     CONSTRAINT fk_pr_rca_human_eval_selected_result
         FOREIGN KEY (selected_result_id) REFERENCES PR_RCA_RESULT (result_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS PR_RCA_JUDGE (
+    judge_id BIGINT NOT NULL AUTO_INCREMENT,
+    result_id BIGINT NOT NULL,
+    judge_type VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'SUCCESS',
+    total_score DOUBLE NULL,
+    accuracy_score DOUBLE NULL,
+    reasoning_score DOUBLE NULL,
+    evidence_score DOUBLE NULL,
+    actionability_score DOUBLE NULL,
+    accuracy_comment TEXT NULL,
+    reasoning_comment TEXT NULL,
+    evidence_comment TEXT NULL,
+    actionability_comment TEXT NULL,
+    judge_comment TEXT NULL,
+    raw_response LONGTEXT NULL,
+    evaluator VARCHAR(100) NULL,
+    update_dt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (judge_id),
+    KEY idx_pr_rca_judge_result_id (result_id),
+    KEY idx_pr_rca_judge_type (judge_type),
+    CONSTRAINT fk_pr_rca_judge_result
+        FOREIGN KEY (result_id) REFERENCES PR_RCA_RESULT (result_id)
+        ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

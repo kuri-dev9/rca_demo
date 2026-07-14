@@ -16,6 +16,7 @@ import re
 import resource
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ from sqlalchemy import func, select
 
 from app.config import settings
 from app.database import get_db
-from app.models import Conversation, Message, RcaHumanEvaluation, RcaInput, RcaPrompt, RcaResult, RcaRun, RcaStep
+from app.models import Conversation, Message, RcaHumanEvaluation, RcaInput, RcaJudge, RcaPrompt, RcaResult, RcaRun, RcaStep
 from app.schemas import RcaPromptCreate, RcaPromptResponse, RcaRunNormalRequest, RcaRunNormalResponse
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
@@ -180,6 +181,22 @@ def _preview_text(text: str, limit: int = 240) -> str:
     return normalized[:limit].rstrip() + "..."
 
 
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n...(truncated)"
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+        return max(0.0, min(100.0, number))
+    except (TypeError, ValueError):
+        return None
+
+
 def _score_values(result: RcaResult | None) -> list[float]:
     if not result:
         return []
@@ -199,10 +216,226 @@ def _overall_score(result: RcaResult | None) -> float | None:
     return round(sum(values) / len(values), 2)
 
 
+def _avg(values: list[float | None]) -> float | None:
+    clean = [float(value) for value in values if value is not None]
+    if not clean:
+        return None
+    return round(sum(clean) / len(clean), 2)
+
+
+def _score_summary(results: list[RcaResult]) -> dict[str, Any]:
+    total_scores = [_overall_score(result) for result in results]
+    return {
+        "execution_count": len(results),
+        "average_score": _avg(total_scores),
+        "best_score": max([score for score in total_scores if score is not None], default=None),
+        "worst_score": min([score for score in total_scores if score is not None], default=None),
+        "recent_10_average": _avg(total_scores[:10]),
+        "recent_50_average": _avg(total_scores[:50]),
+        "accuracy_average": _avg([result.accuracy_score for result in results]),
+        "reasoning_average": _avg([result.reasoning_score for result in results]),
+        "evidence_average": _avg([result.evidence_score for result in results]),
+        "actionability_average": _avg([result.actionability_score for result in results]),
+    }
+
+
+def _human_score(rating: str) -> float | None:
+    normalized = rating.upper()
+    if normalized == "GOOD":
+        return 95.0
+    if normalized == "NORMAL":
+        return 70.0
+    if normalized == "BAD":
+        return 40.0
+    return None
+
+
+def _comment_phrases(results: list[RcaResult]) -> list[str]:
+    comments: list[str] = []
+    for result in results:
+        for value in (
+            result.accuracy_comment,
+            result.reasoning_comment,
+            result.evidence_comment,
+            result.actionability_comment,
+            result.evaluation_comment,
+        ):
+            if not value:
+                continue
+            for piece in re.split(r"[\n\r.!?。]+", value):
+                phrase = piece.strip(" -•\t")
+                if len(phrase) >= 4:
+                    comments.append(phrase[:120])
+    return comments
+
+
+def _comment_frequency(results: list[RcaResult], limit: int = 12) -> list[dict[str, Any]]:
+    counter = Counter(_comment_phrases(results))
+    return [
+        {"comment": comment, "count": count}
+        for comment, count in counter.most_common(limit)
+    ]
+
+
+def _metric_label(metric: str) -> str:
+    return {
+        "accuracy_average": "정확도",
+        "reasoning_average": "추론",
+        "evidence_average": "근거",
+        "actionability_average": "조치성",
+    }.get(metric, metric)
+
+
+def _build_meta_analysis(stats: dict[str, Any], comments: list[dict[str, Any]]) -> dict[str, Any]:
+    strengths: list[str] = []
+    weaknesses: list[str] = []
+    improvement_suggestions: list[str] = []
+    metric_keys = ["accuracy_average", "reasoning_average", "evidence_average", "actionability_average"]
+
+    for key in metric_keys:
+        value = stats.get(key)
+        if value is None:
+            continue
+        label = _metric_label(key)
+        if value >= 85:
+            strengths.append(f"{label} 점수가 안정적으로 높음({value})")
+        elif value < 70:
+            weaknesses.append(f"{label} 점수가 낮음({value})")
+
+    if not strengths and stats.get("average_score") is not None:
+        strengths.append(f"누적 평균 점수 {stats['average_score']} 기준으로 현재 성능 기준선을 형성함")
+    if not weaknesses and stats.get("average_score") is not None and stats["average_score"] < 80:
+        weaknesses.append("전체 평균 점수가 80 미만이라 개선 여지가 큼")
+    if stats.get("execution_count", 0) < 3:
+        weaknesses.append("실행 샘플 수가 적어 통계 신뢰도가 낮음")
+
+    frequent_issues = [item["comment"] for item in comments[:5]]
+    for issue in frequent_issues:
+        if any(keyword in issue for keyword in ("근거", "Evidence", "evidence")):
+            improvement_suggestions.append("RCA 후보별 근거와 원본 관찰 데이터 연결을 더 명확히 요구")
+        elif any(keyword in issue for keyword in ("추론", "Reasoning", "reasoning")):
+            improvement_suggestions.append("패턴 간 연관성과 판단 과정을 단계적으로 설명하도록 요구")
+        elif any(keyword in issue for keyword in ("조치", "Action", "action")):
+            improvement_suggestions.append("장애 위치별 확인 항목과 조치 방향을 분리해 작성하도록 요구")
+
+    if stats.get("evidence_average") is not None and stats["evidence_average"] < 75:
+        improvement_suggestions.append("근거 인용 비중을 높이고 입력 데이터에 있는 수치/패턴을 함께 제시")
+    if stats.get("reasoning_average") is not None and stats["reasoning_average"] < 75:
+        improvement_suggestions.append("Failure Chain과 Interface 흐름을 RCA 후보 근거로 활용")
+    if stats.get("actionability_average") is not None and stats["actionability_average"] < 75:
+        improvement_suggestions.append("조치 권고를 점검 대상, 확인 방법, 기대 결과로 나누어 작성")
+
+    if not improvement_suggestions:
+        improvement_suggestions.append("현재 성능 저하 신호가 뚜렷하지 않아 추가 실행 데이터 축적 후 개선 방향을 확정")
+
+    return {
+        "strengths": strengths or ["평가 데이터가 부족하여 강점을 확정하기 어려움"],
+        "weaknesses": weaknesses or ["평가 데이터 기준 뚜렷한 약점이 아직 관찰되지 않음"],
+        "frequent_issues": frequent_issues,
+        "improvement_suggestions": list(dict.fromkeys(improvement_suggestions)),
+    }
+
+
 def _run_status(step: RcaStep | None) -> str:
     if not step:
         return "READY"
     return "SUCCESS" if step.result_id else "FAILED"
+
+
+async def _apply_local_ai_judge(
+    db: AsyncSession,
+    *,
+    result_row: RcaResult,
+    rca_input: RcaInput,
+    rca_prompt: RcaPrompt,
+    model: str,
+) -> None:
+    system_prompt = (
+        "당신은 RCA 결과 평가자입니다. 입력 데이터, 사용된 Prompt, RCA 결과를 비교하여 "
+        "Accuracy, Reasoning, Evidence, Actionability를 0~100 점수와 짧은 한국어 코멘트로 평가합니다. "
+        "반드시 JSON만 출력하세요."
+    )
+    user_payload = {
+        "input": _truncate_text(rca_input.text or "", 12000),
+        "prompt": _truncate_text(rca_prompt.text or "", 8000),
+        "result": _truncate_text(result_row.text or "", 12000),
+        "output_schema": {
+            "accuracy_score": 0,
+            "accuracy_comment": "",
+            "reasoning_score": 0,
+            "reasoning_comment": "",
+            "evidence_score": 0,
+            "evidence_comment": "",
+            "actionability_score": 0,
+            "actionability_comment": "",
+            "overall_comment": "",
+        },
+    }
+    llm_payload = {
+        "model": model or RCA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+        "stream": False,
+        "think": False,
+        "format": "json",
+        "options": build_core_options(num_predict=2048),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                f"{settings.ollama_base_url}/api/chat",
+                json=llm_payload,
+            )
+            response.raise_for_status()
+            raw_content = _extract_chat_content(response.json())
+        parsed = json.loads(raw_content)
+        accuracy_score = _safe_float(parsed.get("accuracy_score"))
+        reasoning_score = _safe_float(parsed.get("reasoning_score"))
+        evidence_score = _safe_float(parsed.get("evidence_score"))
+        actionability_score = _safe_float(parsed.get("actionability_score"))
+        total_score = _avg([accuracy_score, reasoning_score, evidence_score, actionability_score])
+
+        result_row.accuracy_score = accuracy_score
+        result_row.reasoning_score = reasoning_score
+        result_row.evidence_score = evidence_score
+        result_row.actionability_score = actionability_score
+        result_row.accuracy_comment = str(parsed.get("accuracy_comment") or "")[:2000] or None
+        result_row.reasoning_comment = str(parsed.get("reasoning_comment") or "")[:2000] or None
+        result_row.evidence_comment = str(parsed.get("evidence_comment") or "")[:2000] or None
+        result_row.actionability_comment = str(parsed.get("actionability_comment") or "")[:2000] or None
+        result_row.evaluation_comment = str(parsed.get("overall_comment") or "")[:2000] or None
+        db.add(
+            RcaJudge(
+                result_id=result_row.result_id,
+                judge_type="LOCAL",
+                status="SUCCESS",
+                total_score=total_score,
+                accuracy_score=accuracy_score,
+                reasoning_score=reasoning_score,
+                evidence_score=evidence_score,
+                actionability_score=actionability_score,
+                accuracy_comment=result_row.accuracy_comment,
+                reasoning_comment=result_row.reasoning_comment,
+                evidence_comment=result_row.evidence_comment,
+                actionability_comment=result_row.actionability_comment,
+                judge_comment=result_row.evaluation_comment,
+                raw_response=raw_content,
+                evaluator=model or RCA_MODEL,
+            )
+        )
+    except Exception as exc:
+        logger.warning("LOCAL AI Judge failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+        db.add(
+            RcaJudge(
+                result_id=result_row.result_id,
+                judge_type="LOCAL",
+                status="FAILED",
+                judge_comment=f"{type(exc).__name__}: {exc}"[:2000],
+                evaluator=model or RCA_MODEL,
+            )
+        )
 
 
 def _rss_mb() -> float:
@@ -544,7 +777,7 @@ async def run_normal_rca_experiment(
     if not rca_prompt:
         raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
 
-    run = RcaRun(run_mode="NORMAL")
+    run = RcaRun(run_mode="NORMAL", model=payload.model or RCA_MODEL)
     db.add(run)
     await db.flush()
     step = RcaStep(
@@ -584,6 +817,13 @@ async def run_normal_rca_experiment(
         db.add(result_row)
         await db.flush()
         step.result_id = result_row.result_id
+        await _apply_local_ai_judge(
+            db,
+            result_row=result_row,
+            rca_input=rca_input,
+            rca_prompt=rca_prompt,
+            model=payload.model or RCA_MODEL,
+        )
         await db.commit()
         return RcaRunNormalResponse(
             success=True,
@@ -680,10 +920,11 @@ async def list_rca_lab_prompts(db: AsyncSession = Depends(get_db)):
                 select(RcaStep, RcaResult)
                 .outerjoin(RcaResult, RcaResult.result_id == RcaStep.result_id)
                 .where(RcaStep.prompt_id == prompt.prompt_id)
+                .order_by(RcaStep.step_id.desc())
             )
         ).all()
-        scores = [_overall_score(result) for _step, result in steps]
-        scores = [score for score in scores if score is not None]
+        result_rows = [result for _step, result in steps if result is not None]
+        stats = _score_summary(result_rows)
         items.append({
             "prompt_id": prompt.prompt_id,
             "prompt_name": f"PROMPT_{prompt.prompt_id:04d}",
@@ -693,10 +934,7 @@ async def list_rca_lab_prompts(db: AsyncSession = Depends(get_db)):
             "hash": prompt.hash,
             "priority": prompt.priority,
             "update_dt": prompt.update_dt,
-            "execution_count": len(steps),
-            "average_score": round(sum(scores) / len(scores), 2) if scores else None,
-            "best_score": max(scores) if scores else None,
-            "worst_score": min(scores) if scores else None,
+            **stats,
             "text_preview": _preview_text(prompt.text, 160),
         })
     return items
@@ -718,6 +956,210 @@ async def get_rca_lab_prompt(prompt_id: int, db: AsyncSession = Depends(get_db))
         "update_dt": row.update_dt,
         "text": row.text,
     }
+
+
+async def _prompt_result_rows(
+    db: AsyncSession,
+    prompt_id: int,
+    *,
+    input_id: int | None = None,
+    model: str | None = None,
+) -> list[tuple[RcaStep, RcaRun, RcaResult]]:
+    stmt = (
+        select(RcaStep, RcaRun, RcaResult)
+        .join(RcaRun, RcaRun.run_id == RcaStep.run_id)
+        .join(RcaResult, RcaResult.result_id == RcaStep.result_id)
+        .where(RcaStep.prompt_id == prompt_id)
+        .order_by(RcaStep.step_id.desc())
+    )
+    if input_id:
+        stmt = stmt.where(RcaStep.input_id == input_id)
+    if model:
+        stmt = stmt.where(func.coalesce(RcaRun.model, RCA_MODEL) == model)
+    return list((await db.execute(stmt)).all())
+
+
+async def _prompt_human_summary(db: AsyncSession, result_ids: list[int]) -> dict[str, Any]:
+    if not result_ids:
+        return {
+            "human_count": 0,
+            "human_average_score": None,
+            "rating_counts": {},
+            "ai_human_gap": None,
+        }
+    rows = (
+        await db.execute(
+            select(RcaHumanEvaluation)
+            .where(RcaHumanEvaluation.result_id.in_(result_ids))
+            .order_by(RcaHumanEvaluation.evaluation_id.desc())
+        )
+    ).scalars().all()
+    scores = [_human_score(row.rating) for row in rows]
+    rating_counts = Counter(row.rating for row in rows)
+    return {
+        "human_count": len(rows),
+        "human_average_score": _avg(scores),
+        "rating_counts": dict(rating_counts),
+        "ai_human_gap": None,
+    }
+
+
+@router.get("/lab/prompts/{prompt_id}/stats")
+async def get_rca_lab_prompt_stats(
+    prompt_id: int,
+    input_id: int | None = None,
+    model: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    prompt = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == prompt_id))
+    if not prompt:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+    rows = await _prompt_result_rows(db, prompt_id, input_id=input_id, model=model)
+    results = [result for _step, _run, result in rows]
+    stats = _score_summary(results)
+    human_summary = await _prompt_human_summary(db, [result.result_id for result in results])
+    if stats["average_score"] is not None and human_summary["human_average_score"] is not None:
+        human_summary["ai_human_gap"] = round(human_summary["human_average_score"] - stats["average_score"], 2)
+    return {
+        "prompt_id": prompt.prompt_id,
+        "prompt_name": f"PROMPT_{prompt.prompt_id:04d}",
+        "version": f"v{prompt.prompt_id}",
+        "model": model,
+        "input_id": input_id,
+        **stats,
+        **human_summary,
+    }
+
+
+@router.get("/lab/prompts/{prompt_id}/comments")
+async def get_rca_lab_prompt_comments(
+    prompt_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    prompt = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == prompt_id))
+    if not prompt:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+    rows = await _prompt_result_rows(db, prompt_id)
+    results = [result for _step, _run, result in rows]
+    return {
+        "prompt_id": prompt_id,
+        "comment_frequency": _comment_frequency(results),
+        "comment_count": len(_comment_phrases(results)),
+    }
+
+
+@router.get("/lab/prompts/{prompt_id}/meta-analysis")
+async def analyze_rca_lab_prompt(
+    prompt_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    prompt = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == prompt_id))
+    if not prompt:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+    rows = await _prompt_result_rows(db, prompt_id)
+    results = [result for _step, _run, result in rows]
+    stats = _score_summary(results)
+    comments = _comment_frequency(results)
+    analysis = _build_meta_analysis(stats, comments)
+    return {
+        "prompt_id": prompt_id,
+        "prompt_name": f"PROMPT_{prompt_id:04d}",
+        "stats": stats,
+        "comment_frequency": comments,
+        "analysis": analysis,
+        "improvement_proposal": {
+            "summary": "현재 Prompt의 누적 점수와 평가 Comment를 기준으로 한 개선 제안입니다. 실제 Prompt 수정은 수행하지 않습니다.",
+            "items": analysis["improvement_suggestions"],
+        },
+    }
+
+
+@router.get("/lab/prompt-compare")
+async def compare_rca_lab_prompts(
+    left_prompt_id: int,
+    right_prompt_id: int,
+    input_id: int | None = None,
+    model: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    left_prompt = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == left_prompt_id))
+    right_prompt = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == right_prompt_id))
+    if not left_prompt or not right_prompt:
+        raise HTTPException(status_code=404, detail="비교할 Prompt를 찾을 수 없습니다")
+
+    left_results = [result for _step, _run, result in await _prompt_result_rows(db, left_prompt_id, input_id=input_id, model=model)]
+    right_results = [result for _step, _run, result in await _prompt_result_rows(db, right_prompt_id, input_id=input_id, model=model)]
+    left_stats = _score_summary(left_results)
+    right_stats = _score_summary(right_results)
+    metric_map = {
+        "total_score": ("average_score", "Total Score"),
+        "accuracy": ("accuracy_average", "Accuracy"),
+        "reasoning": ("reasoning_average", "Reasoning"),
+        "evidence": ("evidence_average", "Evidence"),
+        "actionability": ("actionability_average", "Actionability"),
+    }
+    deltas = {}
+    for key, (stat_key, _label) in metric_map.items():
+        left_value = left_stats.get(stat_key)
+        right_value = right_stats.get(stat_key)
+        deltas[key] = None if left_value is None or right_value is None else round(right_value - left_value, 2)
+
+    improved = [label for key, (_stat_key, label) in metric_map.items() if deltas[key] is not None and deltas[key] > 0]
+    declined = [label for key, (_stat_key, label) in metric_map.items() if deltas[key] is not None and deltas[key] < 0]
+    summary_parts = []
+    if improved:
+        summary_parts.append(f"{right_prompt_id}번 Prompt는 {', '.join(improved)} 지표가 향상됨")
+    if declined:
+        summary_parts.append(f"{', '.join(declined)} 지표는 감소함")
+    if not summary_parts:
+        summary_parts.append("두 Prompt 간 유의미한 점수 차이를 판단할 평가 데이터가 부족함")
+
+    return {
+        "left": {"prompt_id": left_prompt_id, "prompt_name": f"PROMPT_{left_prompt_id:04d}", "stats": left_stats},
+        "right": {"prompt_id": right_prompt_id, "prompt_name": f"PROMPT_{right_prompt_id:04d}", "stats": right_stats},
+        "input_id": input_id,
+        "model": model,
+        "deltas": deltas,
+        "change_summary": " ".join(summary_parts),
+    }
+
+
+@router.get("/lab/results/prompt-performance")
+async def list_rca_lab_prompt_performance(
+    input_id: int | None = None,
+    model: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(RcaPrompt, RcaStep, RcaRun, RcaResult)
+        .join(RcaStep, RcaStep.prompt_id == RcaPrompt.prompt_id)
+        .join(RcaRun, RcaRun.run_id == RcaStep.run_id)
+        .join(RcaResult, RcaResult.result_id == RcaStep.result_id)
+        .order_by(RcaStep.step_id.desc())
+    )
+    if input_id:
+        stmt = stmt.where(RcaStep.input_id == input_id)
+    if model:
+        stmt = stmt.where(func.coalesce(RcaRun.model, RCA_MODEL) == model)
+    rows = (await db.execute(stmt)).all()
+    grouped: dict[int, dict[str, Any]] = {}
+    for prompt, _step, run, result in rows:
+        item = grouped.setdefault(
+            prompt.prompt_id,
+            {
+                "prompt_id": prompt.prompt_id,
+                "prompt_name": f"PROMPT_{prompt.prompt_id:04d}",
+                "version": f"v{prompt.prompt_id}",
+                "model": run.model or RCA_MODEL,
+                "results": [],
+            },
+        )
+        item["results"].append(result)
+    output = []
+    for item in grouped.values():
+        results = item.pop("results")
+        output.append({**item, **_score_summary(results)})
+    return sorted(output, key=lambda row: row.get("average_score") or -1, reverse=True)
 
 
 @router.post("/lab/prompts")
@@ -812,7 +1254,7 @@ async def list_rca_lab_experiments(db: AsyncSession = Depends(get_db)):
             "prompt_id": step.prompt_id,
             "prompt_name": f"PROMPT_{step.prompt_id:04d}",
             "result_id": step.result_id,
-            "model": RCA_MODEL,
+            "model": run.model or RCA_MODEL,
             "run_count": 1,
             "status": _run_status(step),
             "score": _overall_score(result),
@@ -823,9 +1265,14 @@ async def list_rca_lab_experiments(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/lab/results/compare")
-async def compare_rca_lab_results(input_id: int | None = None, db: AsyncSession = Depends(get_db)):
+async def compare_rca_lab_results(
+    input_id: int | None = None,
+    model: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
     stmt = (
-        select(RcaStep, RcaInput, RcaPrompt, RcaResult)
+        select(RcaStep, RcaRun, RcaInput, RcaPrompt, RcaResult)
+        .join(RcaRun, RcaRun.run_id == RcaStep.run_id)
         .join(RcaInput, RcaInput.input_id == RcaStep.input_id)
         .join(RcaPrompt, RcaPrompt.prompt_id == RcaStep.prompt_id)
         .join(RcaResult, RcaResult.result_id == RcaStep.result_id)
@@ -834,6 +1281,8 @@ async def compare_rca_lab_results(input_id: int | None = None, db: AsyncSession 
     )
     if input_id:
         stmt = stmt.where(RcaStep.input_id == input_id)
+    if model:
+        stmt = stmt.where(func.coalesce(RcaRun.model, RCA_MODEL) == model)
     rows = (await db.execute(stmt)).all()
     return [
         {
@@ -843,6 +1292,7 @@ async def compare_rca_lab_results(input_id: int | None = None, db: AsyncSession 
             "prompt_id": step.prompt_id,
             "prompt_name": f"PROMPT_{step.prompt_id:04d}",
             "result_id": result.result_id,
+            "model": run.model or RCA_MODEL,
             "score": _overall_score(result),
             "accuracy_score": result.accuracy_score,
             "reasoning_score": result.reasoning_score,
@@ -856,7 +1306,7 @@ async def compare_rca_lab_results(input_id: int | None = None, db: AsyncSession 
             "result_preview": _preview_text(result.text, 300),
             "update_dt": result.update_dt,
         }
-        for step, rca_input, _prompt, result in rows
+        for step, run, rca_input, _prompt, result in rows
     ]
 
 
@@ -882,6 +1332,93 @@ async def get_rca_lab_result(result_id: int, db: AsyncSession = Depends(get_db))
     }
 
 
+def _judge_to_dict(row: RcaJudge) -> dict[str, Any]:
+    return {
+        "judge_id": row.judge_id,
+        "result_id": row.result_id,
+        "judge_type": row.judge_type,
+        "status": row.status,
+        "total_score": row.total_score,
+        "accuracy_score": row.accuracy_score,
+        "reasoning_score": row.reasoning_score,
+        "evidence_score": row.evidence_score,
+        "actionability_score": row.actionability_score,
+        "accuracy_comment": row.accuracy_comment,
+        "reasoning_comment": row.reasoning_comment,
+        "evidence_comment": row.evidence_comment,
+        "actionability_comment": row.actionability_comment,
+        "judge_comment": row.judge_comment,
+        "evaluator": row.evaluator,
+        "update_dt": row.update_dt,
+    }
+
+
+@router.get("/lab/results/{result_id}/evaluation")
+async def get_rca_lab_result_evaluation(result_id: int, db: AsyncSession = Depends(get_db)):
+    row = (
+        await db.execute(
+            select(RcaStep, RcaRun, RcaInput, RcaPrompt, RcaResult)
+            .join(RcaRun, RcaRun.run_id == RcaStep.run_id)
+            .join(RcaInput, RcaInput.input_id == RcaStep.input_id)
+            .join(RcaPrompt, RcaPrompt.prompt_id == RcaStep.prompt_id)
+            .join(RcaResult, RcaResult.result_id == RcaStep.result_id)
+            .where(RcaResult.result_id == result_id)
+        )
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA result를 찾을 수 없습니다")
+    step, run, rca_input, rca_prompt, result = row
+    judges = (
+        await db.execute(
+            select(RcaJudge)
+            .where(RcaJudge.result_id == result_id)
+            .order_by(RcaJudge.judge_id.desc())
+        )
+    ).scalars().all()
+    return {
+        "experiment": {
+            "run_id": run.run_id,
+            "step_id": step.step_id,
+            "run_mode": run.run_mode,
+            "model": run.model or RCA_MODEL,
+            "update_dt": run.update_dt,
+        },
+        "input": {
+            "input_id": rca_input.input_id,
+            "input_name": rca_input.input_name,
+            "summary": _preview_text(rca_input.text, 600),
+            "text": rca_input.text,
+            "record_count": _input_record_count(rca_input.text),
+        },
+        "prompt": {
+            "prompt_id": rca_prompt.prompt_id,
+            "prompt_name": f"PROMPT_{rca_prompt.prompt_id:04d}",
+            "version": f"v{rca_prompt.prompt_id}",
+            "text": rca_prompt.text,
+        },
+        "result": {
+            "result_id": result.result_id,
+            "text": result.text,
+            "update_dt": result.update_dt,
+        },
+        "score": {
+            "total_score": _overall_score(result),
+            "accuracy_score": result.accuracy_score,
+            "reasoning_score": result.reasoning_score,
+            "evidence_score": result.evidence_score,
+            "actionability_score": result.actionability_score,
+        },
+        "comment": {
+            "accuracy_comment": result.accuracy_comment,
+            "reasoning_comment": result.reasoning_comment,
+            "evidence_comment": result.evidence_comment,
+            "actionability_comment": result.actionability_comment,
+            "evaluation_comment": result.evaluation_comment,
+        },
+        "judges": [_judge_to_dict(judge) for judge in judges],
+    }
+
+
 @router.post("/lab/results/{result_id}/human-evaluation")
 async def create_rca_lab_human_evaluation(
     result_id: int,
@@ -903,6 +1440,16 @@ async def create_rca_lab_human_evaluation(
         evaluator=str(payload.get("evaluator") or "human"),
     )
     db.add(row)
+    db.add(
+        RcaJudge(
+            result_id=result_id,
+            judge_type="HUMAN",
+            status="SUCCESS",
+            total_score=_human_score(rating),
+            judge_comment=str(payload.get("comment") or "").strip() or None,
+            evaluator=str(payload.get("evaluator") or "human"),
+        )
+    )
     await db.commit()
     await db.refresh(row)
     return {"success": True, "evaluation_id": row.evaluation_id}
@@ -959,7 +1506,8 @@ async def stream_rca_report(
         text=messages[0]["content"],
     )
     run_row = RcaRun(
-        run_mode="LOOP" if isinstance(context, dict) and context.get("rca_loop_mode") else "NORMAL"
+        run_mode="LOOP" if isinstance(context, dict) and context.get("rca_loop_mode") else "NORMAL",
+        model=conv.model or RCA_MODEL,
     )
     db.add(run_row)
     await db.flush()

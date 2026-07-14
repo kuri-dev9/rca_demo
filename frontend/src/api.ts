@@ -296,6 +296,12 @@ export interface RcaLabPrompt {
   average_score?: number | null;
   best_score?: number | null;
   worst_score?: number | null;
+  recent_10_average?: number | null;
+  recent_50_average?: number | null;
+  accuracy_average?: number | null;
+  reasoning_average?: number | null;
+  evidence_average?: number | null;
+  actionability_average?: number | null;
   text_preview?: string;
   text?: string;
 }
@@ -324,6 +330,7 @@ export interface RcaLabResult {
   prompt_id?: number;
   prompt_name?: string;
   result_id: number;
+  model?: string;
   score?: number | null;
   accuracy_score?: number | null;
   reasoning_score?: number | null;
@@ -337,6 +344,121 @@ export interface RcaLabResult {
   result_preview?: string;
   text?: string;
   update_dt: string;
+}
+
+export interface RcaLabPromptStats {
+  prompt_id: number;
+  prompt_name: string;
+  version: string;
+  model?: string | null;
+  input_id?: number | null;
+  execution_count: number;
+  average_score?: number | null;
+  best_score?: number | null;
+  worst_score?: number | null;
+  recent_10_average?: number | null;
+  recent_50_average?: number | null;
+  accuracy_average?: number | null;
+  reasoning_average?: number | null;
+  evidence_average?: number | null;
+  actionability_average?: number | null;
+  human_count?: number;
+  human_average_score?: number | null;
+  ai_human_gap?: number | null;
+  rating_counts?: Record<string, number>;
+}
+
+export interface RcaLabCommentFrequency {
+  comment: string;
+  count: number;
+}
+
+export interface RcaLabMetaAnalysis {
+  prompt_id: number;
+  prompt_name: string;
+  stats: RcaLabPromptStats;
+  comment_frequency: RcaLabCommentFrequency[];
+  analysis: {
+    strengths: string[];
+    weaknesses: string[];
+    frequent_issues: string[];
+    improvement_suggestions: string[];
+  };
+  improvement_proposal: {
+    summary: string;
+    items: string[];
+  };
+}
+
+export interface RcaLabPromptComparison {
+  left: { prompt_id: number; prompt_name: string; stats: RcaLabPromptStats };
+  right: { prompt_id: number; prompt_name: string; stats: RcaLabPromptStats };
+  input_id?: number | null;
+  model?: string | null;
+  deltas: Record<string, number | null>;
+  change_summary: string;
+}
+
+export interface RcaLabJudge {
+  judge_id: number;
+  result_id: number;
+  judge_type: 'LOCAL' | 'GPT' | 'CLAUDE' | 'GEMINI' | 'HUMAN' | string;
+  status: string;
+  total_score?: number | null;
+  accuracy_score?: number | null;
+  reasoning_score?: number | null;
+  evidence_score?: number | null;
+  actionability_score?: number | null;
+  accuracy_comment?: string | null;
+  reasoning_comment?: string | null;
+  evidence_comment?: string | null;
+  actionability_comment?: string | null;
+  judge_comment?: string | null;
+  evaluator?: string | null;
+  update_dt: string;
+}
+
+export interface RcaLabEvaluationDetail {
+  experiment: {
+    run_id: number;
+    step_id: number;
+    run_mode: string;
+    model: string;
+    update_dt: string;
+  };
+  input: {
+    input_id: number;
+    input_name: string;
+    summary: string;
+    text: string;
+    record_count?: number | null;
+  };
+  prompt: {
+    prompt_id: number;
+    prompt_name: string;
+    version: string;
+    text: string;
+  };
+  result: {
+    result_id: number;
+    text: string;
+    update_dt: string;
+  };
+  score: {
+    total_score?: number | null;
+    accuracy_score?: number | null;
+    reasoning_score?: number | null;
+    evidence_score?: number | null;
+    actionability_score?: number | null;
+  };
+  comment: {
+    accuracy_comment?: string | null;
+    reasoning_comment?: string | null;
+    evidence_comment?: string | null;
+    actionability_comment?: string | null;
+    evaluation_comment?: string | null;
+  };
+  judges: RcaLabJudge[];
 }
 
 async function jsonOrThrow(res: Response, fallback: string) {
@@ -430,15 +552,56 @@ export async function fetchRcaLabExperiments(): Promise<RcaLabExperiment[]> {
   return jsonOrThrow(res, 'RCA Lab Experiment 이력 조회 실패');
 }
 
-export async function fetchRcaLabResults(inputId?: number): Promise<RcaLabResult[]> {
-  const query = inputId ? `?input_id=${inputId}` : '';
-  const res = await fetch(`${API_BASE}/rca/lab/results/compare${query}`);
+export async function fetchRcaLabResults(inputId?: number, model?: string): Promise<RcaLabResult[]> {
+  const params = new URLSearchParams();
+  if (inputId) params.append('input_id', String(inputId));
+  if (model) params.append('model', model);
+  const res = await fetch(`${API_BASE}/rca/lab/results/compare${params.toString() ? `?${params}` : ''}`);
   return jsonOrThrow(res, 'RCA Lab Result 비교 조회 실패');
+}
+
+export async function fetchRcaLabPromptPerformance(inputId?: number, model?: string): Promise<RcaLabPromptStats[]> {
+  const params = new URLSearchParams();
+  if (inputId) params.append('input_id', String(inputId));
+  if (model) params.append('model', model);
+  const res = await fetch(`${API_BASE}/rca/lab/results/prompt-performance${params.toString() ? `?${params}` : ''}`);
+  return jsonOrThrow(res, 'Prompt 성능 통계 조회 실패');
+}
+
+export async function fetchRcaLabPromptStats(promptId: number): Promise<RcaLabPromptStats> {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts/${promptId}/stats`);
+  return jsonOrThrow(res, 'Prompt 통계 조회 실패');
+}
+
+export async function fetchRcaLabPromptComments(promptId: number): Promise<{ prompt_id: number; comment_frequency: RcaLabCommentFrequency[]; comment_count: number }> {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts/${promptId}/comments`);
+  return jsonOrThrow(res, 'Prompt Comment 분석 실패');
+}
+
+export async function analyzeRcaLabPrompt(promptId: number): Promise<RcaLabMetaAnalysis> {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts/${promptId}/meta-analysis`);
+  return jsonOrThrow(res, 'Meta Analyzer 실행 실패');
+}
+
+export async function compareRcaLabPrompts(leftPromptId: number, rightPromptId: number, inputId?: number, model?: string): Promise<RcaLabPromptComparison> {
+  const params = new URLSearchParams({
+    left_prompt_id: String(leftPromptId),
+    right_prompt_id: String(rightPromptId),
+  });
+  if (inputId) params.append('input_id', String(inputId));
+  if (model) params.append('model', model);
+  const res = await fetch(`${API_BASE}/rca/lab/prompt-compare?${params}`);
+  return jsonOrThrow(res, 'Prompt 차수 비교 실패');
 }
 
 export async function fetchRcaLabResult(id: number): Promise<RcaLabResult> {
   const res = await fetch(`${API_BASE}/rca/lab/results/${id}`);
   return jsonOrThrow(res, 'RCA Lab Result 상세 조회 실패');
+}
+
+export async function fetchRcaLabEvaluation(resultId: number): Promise<RcaLabEvaluationDetail> {
+  const res = await fetch(`${API_BASE}/rca/lab/results/${resultId}/evaluation`);
+  return jsonOrThrow(res, 'RCA Lab 평가 상세 조회 실패');
 }
 
 export async function createRcaLabHumanEvaluation(resultId: number, rating: string, comment: string) {

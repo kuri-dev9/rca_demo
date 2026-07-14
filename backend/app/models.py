@@ -98,6 +98,7 @@ class RcaRun(Base):
 
     run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     run_mode: Mapped[str] = mapped_column(String(20))
+    model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     update_dt: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
@@ -158,6 +159,32 @@ class RcaHumanEvaluation(Base):
     selected_result_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("PR_RCA_RESULT.result_id"), nullable=True)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     evaluator: Mapped[str] = mapped_column(String(100), default="human")
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    result: Mapped["RcaResult"] = relationship(foreign_keys=[result_id])
+
+
+class RcaJudge(Base):
+    __tablename__ = "PR_RCA_JUDGE"
+
+    judge_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    result_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("PR_RCA_RESULT.result_id", ondelete="CASCADE"))
+    judge_type: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="SUCCESS")
+    total_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    accuracy_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reasoning_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    actionability_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    accuracy_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reasoning_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    actionability_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    judge_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_response: Mapped[Optional[str]] = mapped_column(LONG_TEXT, nullable=True)
+    evaluator: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     update_dt: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

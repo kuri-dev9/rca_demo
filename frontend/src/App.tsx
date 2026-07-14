@@ -41,6 +41,7 @@ function App() {
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [rcaLabOpen, setRcaLabOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true');
   const [rcaLoading, setRcaLoading] = useState(false);
   const [rcaLoopMode, setRcaLoopMode] = useState(false);
   const [hallucinationStep2, setHallucinationStep2] = useState(false);
@@ -85,6 +86,10 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
   }, [dark]);
+
+  useEffect(() => {
+    localStorage.setItem('sidebarCollapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     loadConversations();
@@ -567,19 +572,30 @@ function App() {
 
   return (
     <div className="app">
-      <Sidebar
-        conversations={conversations}
-        activeId={activeConvId}
-        onSelect={handleSelectConversation}
-        onCreate={handleCreateConversation}
-        onDelete={handleDeleteConversation}
-        onRename={handleRenameConversation}
-        onExport={handleExport}
-        onImport={handleImport}
-      />
+      {!sidebarCollapsed && (
+        <Sidebar
+          conversations={conversations}
+          activeId={activeConvId}
+          onSelect={handleSelectConversation}
+          onCreate={handleCreateConversation}
+          onDelete={handleDeleteConversation}
+          onRename={handleRenameConversation}
+          onExport={handleExport}
+          onImport={handleImport}
+        />
+      )}
       <main className="main">
         <header className="header">
-          <ModelSelector models={models} selectedModel={selectedModel} onChange={handleModelChange} />
+          <div className="header-left">
+            <button
+              className="sidebar-toggle-btn"
+              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              title={sidebarCollapsed ? '좌측 메뉴 펼치기' : '좌측 메뉴 접기'}
+            >
+              ☰
+            </button>
+            <ModelSelector models={models} selectedModel={selectedModel} onChange={handleModelChange} />
+          </div>
           <div className="header-actions">
             <button
               className={`knowledge-btn ${rcaLabOpen ? 'active' : ''}`}

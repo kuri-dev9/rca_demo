@@ -499,6 +499,29 @@ body {
   font-size: 13px;
 }
 
+.rca-judge-detail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg-primary);
+}
+
+.rca-judge-detail p {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.rca-judge-detail pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 8px;
+}
+
 .rca-lab-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));

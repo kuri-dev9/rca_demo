@@ -168,6 +168,7 @@ def _input_record_count(text: str) -> int | None:
     match = _TOTAL_RECORD_RE.search(text)
     if not match:
         return None
+    raw_content = ""
     try:
         return int(match.group(1).replace(",", ""))
     except ValueError:
@@ -444,44 +445,27 @@ async def _apply_local_ai_judge(
         "options": build_core_options(num_predict=2048),
     }
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"{settings.ollama_base_url}/api/chat",
-                json=llm_payload,
-            )
-            response.raise_for_status()
-            raw_content = _extract_chat_content(response.json())
-        parsed = json.loads(raw_content)
-        accuracy_score = _safe_float(parsed.get("accuracy_score"))
-        reasoning_score = _safe_float(parsed.get("reasoning_score"))
-        evidence_score = _safe_float(parsed.get("evidence_score"))
-        actionability_score = _safe_float(parsed.get("actionability_score"))
-        total_score = _avg([accuracy_score, reasoning_score, evidence_score, actionability_score])
-
-        result_row.accuracy_score = accuracy_score
-        result_row.reasoning_score = reasoning_score
-        result_row.evidence_score = evidence_score
-        result_row.actionability_score = actionability_score
-        result_row.accuracy_comment = str(parsed.get("accuracy_comment") or "")[:2000] or None
-        result_row.reasoning_comment = str(parsed.get("reasoning_comment") or "")[:2000] or None
-        result_row.evidence_comment = str(parsed.get("evidence_comment") or "")[:2000] or None
-        result_row.actionability_comment = str(parsed.get("actionability_comment") or "")[:2000] or None
-        result_row.evaluation_comment = str(parsed.get("overall_comment") or "")[:2000] or None
+        score_payload, raw_content = await _run_local_judge_payload(
+            result_row=result_row,
+            rca_input=rca_input,
+            rca_prompt=rca_prompt,
+            model=model,
+        )
         db.add(
             RcaJudge(
                 result_id=result_row.result_id,
                 judge_type="LOCAL",
                 status="SUCCESS",
-                total_score=total_score,
-                accuracy_score=accuracy_score,
-                reasoning_score=reasoning_score,
-                evidence_score=evidence_score,
-                actionability_score=actionability_score,
-                accuracy_comment=result_row.accuracy_comment,
-                reasoning_comment=result_row.reasoning_comment,
-                evidence_comment=result_row.evidence_comment,
-                actionability_comment=result_row.actionability_comment,
-                judge_comment=result_row.evaluation_comment,
+                total_score=score_payload["total_score"],
+                accuracy_score=score_payload["accuracy_score"],
+                reasoning_score=score_payload["reasoning_score"],
+                evidence_score=score_payload["evidence_score"],
+                actionability_score=score_payload["actionability_score"],
+                accuracy_comment=score_payload["accuracy_comment"],
+                reasoning_comment=score_payload["reasoning_comment"],
+                evidence_comment=score_payload["evidence_comment"],
+                actionability_comment=score_payload["actionability_comment"],
+                judge_comment=score_payload["judge_comment"],
                 raw_response=raw_content,
                 evaluator=model or RCA_MODEL,
             )
@@ -543,6 +527,186 @@ def _apply_judge_scores_to_result(result_row: RcaResult, parsed: dict[str, Any])
     }
 
 
+def _result_judge_payload(result_row: RcaResult, parsed: dict[str, Any], *, judge_comment: str | None = None) -> dict[str, Any]:
+    score_payload = _apply_judge_scores_to_result(result_row, parsed)
+    if judge_comment is not None:
+        score_payload["judge_comment"] = judge_comment[:4000] or None
+    return score_payload
+
+
+def _short_judge_error(exc: Exception) -> str:
+    if isinstance(exc, json.JSONDecodeError):
+        return "Judge 응답 파싱 실패"
+    if isinstance(exc, httpx.TimeoutException):
+        return "Judge 호출 Timeout"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "Judge HTTP 오류"
+    if isinstance(exc, ValueError) and "비어" in str(exc):
+        return "Judge 응답 비어 있음"
+    return "Judge 실행 실패"
+
+
+async def _run_local_judge_payload(
+    *,
+    result_row: RcaResult,
+    rca_input: RcaInput,
+    rca_prompt: RcaPrompt,
+    model: str,
+) -> tuple[dict[str, Any], str]:
+    system_prompt = (
+        "당신은 RCA 결과 평가자입니다. 입력 데이터, 사용된 Prompt, RCA 결과를 비교하여 "
+        "Accuracy, Reasoning, Evidence, Actionability를 0~100 점수와 짧은 한국어 코멘트로 평가합니다. "
+        "반드시 JSON만 출력하세요."
+    )
+    user_payload = {
+        "input": _truncate_text(rca_input.text or "", 12000),
+        "prompt": _truncate_text(rca_prompt.text or "", 8000),
+        "result": _truncate_text(result_row.text or "", 12000),
+        "output_schema": {
+            "accuracy_score": 0,
+            "accuracy_comment": "",
+            "reasoning_score": 0,
+            "reasoning_comment": "",
+            "evidence_score": 0,
+            "evidence_comment": "",
+            "actionability_score": 0,
+            "actionability_comment": "",
+            "overall_comment": "",
+        },
+    }
+    llm_payload = {
+        "model": model or RCA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+        "stream": False,
+        "think": False,
+        "format": "json",
+        "options": build_core_options(num_predict=2048),
+    }
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            f"{settings.ollama_base_url}/api/chat",
+            json=llm_payload,
+        )
+        response.raise_for_status()
+        raw_content = _extract_chat_content(response.json())
+    parsed = _parse_judge_json(raw_content)
+    return _result_judge_payload(result_row, parsed), raw_content
+
+
+async def _run_claude_judge_payload(
+    *,
+    result_row: RcaResult,
+    rca_input: RcaInput,
+    rca_prompt: RcaPrompt,
+) -> tuple[dict[str, Any], str]:
+    if not settings.anthropic_api_key:
+        raise ValueError("anthropic_api_key가 설정되어 있지 않습니다")
+    try:
+        from anthropic import AsyncAnthropic
+    except Exception as exc:
+        raise ValueError(f"anthropic 패키지를 불러올 수 없습니다: {exc}") from exc
+
+    system_prompt = (
+        "당신은 LTE/5G RCA 검증 전문가입니다. RCA를 새로 생성하지 말고 평가만 수행합니다. "
+        "입력 데이터, 실행 Prompt, RCA 결과를 모두 참조하여 실제 RCA 품질 기준으로 냉정하게 평가합니다. "
+        "제공된 평가 도구를 사용해 구조화된 점수와 코멘트를 반환합니다."
+    )
+    user_prompt = f"""다음 정보를 참고하여 RCA 결과를 평가하라.
+
+[INPUT]
+{_truncate_text(rca_input.text or "", 14000)}
+
+[PROMPT]
+{_truncate_text(rca_prompt.text or "", 8000)}
+
+[RCA RESULT]
+{_truncate_text(result_row.text or "", 14000)}
+
+다음 항목을 0~100점으로 평가하라.
+1. Accuracy
+2. Reasoning
+3. Evidence
+4. Actionability
+
+추가로 작성하라.
+- 좋은 점
+- 개선할 점
+- 치명적인 문제
+
+절대 관대하게 평가하지 말고 실제 RCA 품질 기준으로 냉정하게 평가하라.
+"""
+    judge_tool = {
+        "name": "record_rca_judge",
+        "description": "RCA 결과 품질 평가 점수와 코멘트를 저장한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "accuracy_score": {"type": "number", "minimum": 0, "maximum": 100},
+                "accuracy_comment": {"type": "string"},
+                "reasoning_score": {"type": "number", "minimum": 0, "maximum": 100},
+                "reasoning_comment": {"type": "string"},
+                "evidence_score": {"type": "number", "minimum": 0, "maximum": 100},
+                "evidence_comment": {"type": "string"},
+                "actionability_score": {"type": "number", "minimum": 0, "maximum": 100},
+                "actionability_comment": {"type": "string"},
+                "good_points": {"type": "string"},
+                "improvement_points": {"type": "string"},
+                "critical_issues": {"type": "string"},
+                "overall_comment": {"type": "string"},
+            },
+            "required": [
+                "accuracy_score",
+                "accuracy_comment",
+                "reasoning_score",
+                "reasoning_comment",
+                "evidence_score",
+                "evidence_comment",
+                "actionability_score",
+                "actionability_comment",
+                "overall_comment",
+            ],
+        },
+    }
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key, timeout=90.0)
+    response = await client.messages.create(
+        model=CLAUDE_VERIFIER_MODEL,
+        max_tokens=1600,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+        tools=[judge_tool],
+        tool_choice={"type": "tool", "name": "record_rca_judge"},
+    )
+    tool_payload = None
+    for block in response.content:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "record_rca_judge":
+            tool_payload = getattr(block, "input", None)
+            break
+    raw_content = json.dumps(tool_payload, ensure_ascii=False) if isinstance(tool_payload, dict) else "".join(
+        block.text for block in response.content
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+    )
+    if not raw_content.strip():
+        raise ValueError("Claude Judge 응답이 비어 있습니다")
+    parsed = tool_payload if isinstance(tool_payload, dict) else _parse_judge_json(raw_content)
+    score_payload = _apply_judge_scores_to_result(result_row, parsed)
+    good_points = str(parsed.get("good_points") or "").strip()
+    improvement_points = str(parsed.get("improvement_points") or "").strip()
+    critical_issues = str(parsed.get("critical_issues") or "").strip()
+    judge_comment = "\n".join(
+        part for part in [
+            score_payload["judge_comment"],
+            f"좋은 점: {good_points}" if good_points else "",
+            f"개선할 점: {improvement_points}" if improvement_points else "",
+            f"치명적인 문제: {critical_issues}" if critical_issues else "",
+        ]
+        if part
+    )[:4000] or None
+    return _result_judge_payload(result_row, parsed, judge_comment=judge_comment), raw_content
+
+
 async def _apply_claude_ai_judge(
     db: AsyncSession,
     *,
@@ -576,79 +740,13 @@ async def _apply_claude_ai_judge(
         )
         return
 
-    system_prompt = (
-        "당신은 LTE/5G RCA 검증 전문가입니다. RCA를 새로 생성하지 말고 평가만 수행합니다. "
-        "입력 데이터, 실행 Prompt, RCA 결과를 모두 참조하여 실제 RCA 품질 기준으로 냉정하게 평가합니다. "
-        "반드시 JSON만 출력합니다."
-    )
-    user_prompt = f"""다음 정보를 참고하여 RCA 결과를 평가하라.
-
-[INPUT]
-{_truncate_text(rca_input.text or "", 14000)}
-
-[PROMPT]
-{_truncate_text(rca_prompt.text or "", 8000)}
-
-[RCA RESULT]
-{_truncate_text(result_row.text or "", 14000)}
-
-다음 항목을 0~100점으로 평가하라.
-1. Accuracy
-2. Reasoning
-3. Evidence
-4. Actionability
-
-추가로 작성하라.
-- 좋은 점
-- 개선할 점
-- 치명적인 문제
-
-절대 관대하게 평가하지 말고 실제 RCA 품질 기준으로 냉정하게 평가하라.
-
-JSON schema:
-{{
-  "accuracy_score": 0,
-  "accuracy_comment": "",
-  "reasoning_score": 0,
-  "reasoning_comment": "",
-  "evidence_score": 0,
-  "evidence_comment": "",
-  "actionability_score": 0,
-  "actionability_comment": "",
-  "good_points": "",
-  "improvement_points": "",
-  "critical_issues": "",
-  "overall_comment": ""
-}}
-"""
+    raw_content = ""
     try:
-        client = AsyncAnthropic(api_key=settings.anthropic_api_key, timeout=90.0)
-        response = await client.messages.create(
-            model=CLAUDE_VERIFIER_MODEL,
-            max_tokens=1600,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
+        score_payload, raw_content = await _run_claude_judge_payload(
+            result_row=result_row,
+            rca_input=rca_input,
+            rca_prompt=rca_prompt,
         )
-        raw_content = "".join(
-            block.text for block in response.content
-            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
-        )
-        if not raw_content.strip():
-            raise ValueError("Claude Judge 응답이 비어 있습니다")
-        parsed = _parse_judge_json(raw_content)
-        score_payload = _apply_judge_scores_to_result(result_row, parsed)
-        good_points = str(parsed.get("good_points") or "").strip()
-        improvement_points = str(parsed.get("improvement_points") or "").strip()
-        critical_issues = str(parsed.get("critical_issues") or "").strip()
-        judge_comment = "\n".join(
-            part for part in [
-                score_payload["judge_comment"],
-                f"좋은 점: {good_points}" if good_points else "",
-                f"개선할 점: {improvement_points}" if improvement_points else "",
-                f"치명적인 문제: {critical_issues}" if critical_issues else "",
-            ]
-            if part
-        )[:4000] or None
         db.add(
             RcaJudge(
                 result_id=result_row.result_id,
@@ -663,19 +761,25 @@ JSON schema:
                 reasoning_comment=score_payload["reasoning_comment"],
                 evidence_comment=score_payload["evidence_comment"],
                 actionability_comment=score_payload["actionability_comment"],
-                judge_comment=judge_comment,
+                judge_comment=score_payload["judge_comment"],
                 raw_response=raw_content,
                 evaluator=CLAUDE_VERIFIER_MODEL,
             )
         )
     except Exception as exc:
-        logger.warning("CLAUDE AI Judge failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+        logger.warning(
+            "CLAUDE AI Judge failed: %s: %s raw_preview=%s",
+            type(exc).__name__,
+            exc,
+            raw_content[:1000],
+            exc_info=True,
+        )
         db.add(
             RcaJudge(
                 result_id=result_row.result_id,
                 judge_type="CLAUDE",
                 status="FAILED",
-                judge_comment=f"{type(exc).__name__}: {exc}"[:2000],
+                judge_comment=f"{type(exc).__name__}: {exc} raw={raw_content[:1000]}"[:2000],
                 evaluator=CLAUDE_VERIFIER_MODEL,
             )
         )
@@ -1582,6 +1686,15 @@ async def get_rca_lab_result(result_id: int, db: AsyncSession = Depends(get_db))
 
 
 def _judge_to_dict(row: RcaJudge) -> dict[str, Any]:
+    error_type = None
+    error_message = None
+    if row.status == "FAILED" and row.judge_comment:
+        parts = row.judge_comment.split(":", 1)
+        if len(parts) == 2:
+            error_type = parts[0].strip()
+            error_message = parts[1].strip()
+        else:
+            error_message = row.judge_comment
     return {
         "judge_id": row.judge_id,
         "result_id": row.result_id,
@@ -1597,6 +1710,9 @@ def _judge_to_dict(row: RcaJudge) -> dict[str, Any]:
         "evidence_comment": row.evidence_comment,
         "actionability_comment": row.actionability_comment,
         "judge_comment": row.judge_comment,
+        "error_type": error_type,
+        "error_message": error_message,
+        "raw_response": row.raw_response,
         "evaluator": row.evaluator,
         "update_dt": row.update_dt,
     }
@@ -1666,6 +1782,100 @@ async def get_rca_lab_result_evaluation(result_id: int, db: AsyncSession = Depen
         },
         "judges": [_judge_to_dict(judge) for judge in judges],
     }
+
+
+@router.post("/lab/results/{result_id}/evaluate")
+async def evaluate_rca_lab_result(
+    result_id: int,
+    payload: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    judge_type = str(payload.get("judge_type") or "").strip().upper()
+    if judge_type not in {"LOCAL", "CLAUDE"}:
+        raise HTTPException(status_code=422, detail="judge_type은 LOCAL 또는 CLAUDE만 지원합니다")
+
+    row = (
+        await db.execute(
+            select(RcaStep, RcaRun, RcaInput, RcaPrompt, RcaResult)
+            .join(RcaRun, RcaRun.run_id == RcaStep.run_id)
+            .join(RcaInput, RcaInput.input_id == RcaStep.input_id)
+            .join(RcaPrompt, RcaPrompt.prompt_id == RcaStep.prompt_id)
+            .join(RcaResult, RcaResult.result_id == RcaStep.result_id)
+            .where(RcaResult.result_id == result_id)
+        )
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA result를 찾을 수 없습니다")
+
+    running = await db.scalar(
+        select(RcaJudge)
+        .where(RcaJudge.result_id == result_id)
+        .where(RcaJudge.judge_type == judge_type)
+        .where(RcaJudge.status == "RUNNING")
+        .order_by(RcaJudge.judge_id.desc())
+    )
+    if running:
+        raise HTTPException(status_code=409, detail=f"{judge_type} 평가가 이미 실행 중입니다")
+
+    _step, run, rca_input, rca_prompt, result = row
+    running_row = RcaJudge(
+        result_id=result_id,
+        judge_type=judge_type,
+        status="RUNNING",
+        judge_comment=f"{judge_type} 평가 중...",
+        evaluator=(run.model or RCA_MODEL) if judge_type == "LOCAL" else CLAUDE_VERIFIER_MODEL,
+    )
+    db.add(running_row)
+    await db.commit()
+    await db.refresh(running_row)
+
+    raw_content = ""
+    try:
+        if judge_type == "LOCAL":
+            score_payload, raw_content = await _run_local_judge_payload(
+                result_row=result,
+                rca_input=rca_input,
+                rca_prompt=rca_prompt,
+                model=run.model or RCA_MODEL,
+            )
+            evaluator = run.model or RCA_MODEL
+        else:
+            score_payload, raw_content = await _run_claude_judge_payload(
+                result_row=result,
+                rca_input=rca_input,
+                rca_prompt=rca_prompt,
+            )
+            evaluator = CLAUDE_VERIFIER_MODEL
+
+        running_row.status = "SUCCESS"
+        running_row.total_score = score_payload["total_score"]
+        running_row.accuracy_score = score_payload["accuracy_score"]
+        running_row.reasoning_score = score_payload["reasoning_score"]
+        running_row.evidence_score = score_payload["evidence_score"]
+        running_row.actionability_score = score_payload["actionability_score"]
+        running_row.accuracy_comment = score_payload["accuracy_comment"]
+        running_row.reasoning_comment = score_payload["reasoning_comment"]
+        running_row.evidence_comment = score_payload["evidence_comment"]
+        running_row.actionability_comment = score_payload["actionability_comment"]
+        running_row.judge_comment = score_payload["judge_comment"]
+        running_row.raw_response = raw_content
+        running_row.evaluator = evaluator
+        await db.commit()
+        return {"success": True, "judge": _judge_to_dict(running_row)}
+    except Exception as exc:
+        logger.warning(
+            "%s Judge reevaluation failed: %s: %s raw_preview=%s",
+            judge_type,
+            type(exc).__name__,
+            exc,
+            raw_content[:1000],
+            exc_info=True,
+        )
+        running_row.status = "FAILED"
+        running_row.judge_comment = f"{_short_judge_error(exc)} ({type(exc).__name__}: {exc})"[:2000]
+        running_row.raw_response = raw_content
+        await db.commit()
+        return {"success": False, "judge": _judge_to_dict(running_row)}
 
 
 @router.post("/lab/results/{result_id}/human-evaluation")

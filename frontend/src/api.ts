@@ -414,6 +414,9 @@ export interface RcaLabJudge {
   evidence_comment?: string | null;
   actionability_comment?: string | null;
   judge_comment?: string | null;
+  error_type?: string | null;
+  error_message?: string | null;
+  raw_response?: string | null;
   evaluator?: string | null;
   update_dt: string;
 }
@@ -602,6 +605,15 @@ export async function fetchRcaLabResult(id: number): Promise<RcaLabResult> {
 export async function fetchRcaLabEvaluation(resultId: number): Promise<RcaLabEvaluationDetail> {
   const res = await fetch(`${API_BASE}/rca/lab/results/${resultId}/evaluation`);
   return jsonOrThrow(res, 'RCA Lab 평가 상세 조회 실패');
+}
+
+export async function evaluateRcaLabResult(resultId: number, judgeType: 'LOCAL' | 'CLAUDE') {
+  const res = await fetch(`${API_BASE}/rca/lab/results/${resultId}/evaluate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ judge_type: judgeType }),
+  });
+  return jsonOrThrow(res, `${judgeType} Judge 재평가 실패`);
 }
 
 export async function createRcaLabHumanEvaluation(resultId: number, rating: string, comment: string) {

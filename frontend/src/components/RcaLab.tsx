@@ -6,6 +6,7 @@ import {
   createRcaLabPrompt,
   deleteRcaLabInput,
   deleteRcaLabPrompt,
+  evaluateRcaLabResult,
   fetchRcaLabExperiments,
   fetchRcaLabEvaluation,
   fetchRcaLabInput,
@@ -22,6 +23,7 @@ import {
   RcaLabExperiment,
   RcaLabEvaluationDetail,
   RcaLabInput,
+  RcaLabJudge,
   RcaLabMetaAnalysis,
   RcaLabPrompt,
   RcaLabPromptComparison,
@@ -86,6 +88,8 @@ export default function RcaLab({ models, selectedModel }: Props) {
     comment: true,
     judges: true,
   });
+  const [evaluatingJudge, setEvaluatingJudge] = useState<Record<string, boolean>>({});
+  const [expandedJudgeId, setExpandedJudgeId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
 
@@ -251,6 +255,37 @@ export default function RcaLab({ models, selectedModel }: Props) {
     });
   };
 
+  const handleEvaluateJudge = async (judgeType: 'LOCAL' | 'CLAUDE') => {
+    const resultId = evaluationDetail?.result.result_id || selectedResult?.result_id || Number(defaultResultId);
+    if (!resultId) {
+      setMessage('재평가할 Result를 선택하세요.');
+      return;
+    }
+    if (evaluatingJudge[judgeType]) {
+      setMessage(`${judgeType} 평가가 이미 실행 중입니다.`);
+      return;
+    }
+    setEvaluatingJudge((prev) => ({ ...prev, [judgeType]: true }));
+    setMessage(`${judgeType} 평가 중...`);
+    try {
+      await evaluateRcaLabResult(resultId, judgeType);
+      const [detail, evaluation] = await Promise.all([
+        fetchRcaLabResult(resultId),
+        fetchRcaLabEvaluation(resultId),
+      ]);
+      setSelectedResult(detail);
+      setEvaluationDetail(evaluation);
+      await refreshAll();
+      setMessage(`${judgeType} 재평가가 완료되었습니다.`);
+    } catch (err: any) {
+      setMessage(err.message || `${judgeType} 재평가 실패`);
+      const evaluation = await fetchRcaLabEvaluation(resultId).catch(() => null);
+      if (evaluation) setEvaluationDetail(evaluation);
+    } finally {
+      setEvaluatingJudge((prev) => ({ ...prev, [judgeType]: false }));
+    }
+  };
+
   const handleAnalyzePrompt = async () => {
     if (!metaPromptId) {
       setMessage('분석할 Prompt를 선택하세요.');
@@ -304,6 +339,28 @@ export default function RcaLab({ models, selectedModel }: Props) {
     </section>
   );
 
+  const latestJudgeRows = (judges: RcaLabJudge[]) => {
+    const latest = new Map<string, RcaLabJudge>();
+    judges.forEach((judge) => {
+      if (!latest.has(judge.judge_type)) latest.set(judge.judge_type, judge);
+    });
+    (['LOCAL', 'CLAUDE'] as const).forEach((judgeType) => {
+      if (!latest.has(judgeType)) {
+        latest.set(judgeType, {
+          judge_id: -judgeType.length,
+          result_id: evaluationDetail?.result.result_id || 0,
+          judge_type: judgeType,
+          status: 'READY',
+          update_dt: '',
+        });
+      }
+    });
+    return Array.from(latest.values()).sort((a, b) => {
+      const order = ['LOCAL', 'CLAUDE', 'HUMAN', 'GPT', 'GEMINI'];
+      return order.indexOf(a.judge_type) - order.indexOf(b.judge_type);
+    });
+  };
+
   return (
     <div className="rca-lab">
       <div className="rca-lab-tabs">
@@ -313,7 +370,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
           ['experiments', 'Experiment 실행'],
           ['results', 'Result 비교'],
           ['meta', 'Meta Analyzer'],
-          ['human', 'Judge Center'],
+          ['human', 'RCA Review'],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -687,7 +744,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
       {tab === 'human' && (
         <section className="rca-lab-grid">
           <div className="rca-lab-panel wide">
-            <h2>Judge Center</h2>
+            <h2>RCA Review</h2>
             <label>Result</label>
             <select
               value={selectedResult?.result_id || defaultResultId}
@@ -753,21 +810,54 @@ export default function RcaLab({ models, selectedModel }: Props) {
                         <th>Evidence</th>
                         <th>Action</th>
                         <th>Comment</th>
+                        <th>기능</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {evaluationDetail.judges.map((judge) => (
-                        <tr key={judge.judge_id}>
-                          <td>{judge.judge_type}</td>
-                          <td>{judge.status}</td>
-                          <td>{formatScore(judge.total_score)}</td>
-                          <td>{formatScore(judge.accuracy_score)}</td>
-                          <td>{formatScore(judge.reasoning_score)}</td>
-                          <td>{formatScore(judge.evidence_score)}</td>
-                          <td>{formatScore(judge.actionability_score)}</td>
-                          <td>{judge.judge_comment || '-'}</td>
-                        </tr>
-                      ))}
+                      {latestJudgeRows(evaluationDetail.judges).map((judge) => {
+                        const judgeType = judge.judge_type as 'LOCAL' | 'CLAUDE';
+                        const canEvaluate = judge.judge_type === 'LOCAL' || judge.judge_type === 'CLAUDE';
+                        const running = evaluatingJudge[judge.judge_type] || judge.status === 'RUNNING';
+                        return (
+                          <React.Fragment key={`${judge.judge_type}-${judge.judge_id}`}>
+                            <tr>
+                              <td>{judge.judge_type}</td>
+                              <td>{running ? 'RUNNING' : judge.status}</td>
+                              <td>{formatScore(judge.total_score)}</td>
+                              <td>{formatScore(judge.accuracy_score)}</td>
+                              <td>{formatScore(judge.reasoning_score)}</td>
+                              <td>{formatScore(judge.evidence_score)}</td>
+                              <td>{formatScore(judge.actionability_score)}</td>
+                              <td>{judge.status === 'FAILED' ? (judge.error_type || '평가 실패') : (judge.judge_comment || '-')}</td>
+                              <td className="rca-lab-actions">
+                                {canEvaluate && (
+                                  <button disabled={running} onClick={() => handleEvaluateJudge(judgeType)}>
+                                    {running ? '평가 중...' : '다시 평가'}
+                                  </button>
+                                )}
+                                {(judge.error_message || judge.raw_response) && (
+                                  <button onClick={() => setExpandedJudgeId(expandedJudgeId === judge.judge_id ? null : judge.judge_id)}>
+                                    상세
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                            {expandedJudgeId === judge.judge_id && (
+                              <tr>
+                                <td colSpan={9}>
+                                  <div className="rca-judge-detail">
+                                    <p><strong>Error Type</strong>{judge.error_type || '-'}</p>
+                                    <p><strong>Error Message</strong>{judge.error_message || judge.judge_comment || '-'}</p>
+                                    <p><strong>발생 시각</strong>{judge.update_dt ? formatDate(judge.update_dt) : '-'}</p>
+                                    <h3>Raw Response</h3>
+                                    <pre>{judge.raw_response || '-'}</pre>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
                 ))}
@@ -776,7 +866,7 @@ export default function RcaLab({ models, selectedModel }: Props) {
           </div>
           <div className="rca-lab-panel">
             <h2>Human Override</h2>
-            <p className="rca-lab-help">LOCAL Judge와 CLAUDE Judge 이후 사람이 선택적으로 남기는 평가입니다. 향후 GPT/GEMINI/DeepSeek Judge도 같은 구조에 저장할 수 있습니다.</p>
+            <p className="rca-lab-help">LOCAL Judge와 CLAUDE Judge 결과를 검토한 뒤 사람이 선택적으로 남기는 평가입니다. 향후 GPT/GEMINI/DeepSeek Judge도 같은 구조에 저장할 수 있습니다.</p>
             <label>평가</label>
             <div className="rca-lab-rating">
               {['GOOD', 'NORMAL', 'BAD'].map((rating) => (

@@ -6,6 +6,7 @@ import ModelSelector from './components/ModelSelector';
 import ThemeToggle from './components/ThemeToggle';
 import KnowledgePanel from './components/KnowledgePanel';
 import SystemPromptEditor from './components/SystemPromptEditor';
+import RcaLab from './components/RcaLab';
 import { Conversation, Message, OllamaModel, Attachment, PromptDebug } from './types';
 import {
   fetchConversations,
@@ -39,6 +40,7 @@ function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+  const [rcaLabOpen, setRcaLabOpen] = useState(false);
   const [rcaLoading, setRcaLoading] = useState(false);
   const [rcaLoopMode, setRcaLoopMode] = useState(false);
   const [hallucinationStep2, setHallucinationStep2] = useState(false);
@@ -580,6 +582,13 @@ function App() {
           <ModelSelector models={models} selectedModel={selectedModel} onChange={handleModelChange} />
           <div className="header-actions">
             <button
+              className={`knowledge-btn ${rcaLabOpen ? 'active' : ''}`}
+              onClick={() => setRcaLabOpen((prev) => !prev)}
+              title="RCA Lab"
+            >
+              RCA Lab
+            </button>
+            <button
               className={`system-prompt-btn ${currentSystemPrompt ? 'has-prompt' : ''}`}
               onClick={() => setSystemPromptOpen(true)}
               title="시스템 프롬프트"
@@ -661,6 +670,10 @@ function App() {
             <ThemeToggle dark={dark} onToggle={() => setDark(!dark)} />
           </div>
         </header>
+        {rcaLabOpen ? (
+          <RcaLab models={models} selectedModel={selectedModel} />
+        ) : (
+        <>
         <div className="messages">
           {messages.length === 0 && !streaming && (
             <div className="empty-state">
@@ -708,6 +721,8 @@ function App() {
           disabled={streaming}
           streaming={streaming}
         />
+        </>
+        )}
       </main>
       <KnowledgePanel visible={knowledgeOpen} onClose={() => setKnowledgeOpen(false)} />
       <SystemPromptEditor

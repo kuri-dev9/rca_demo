@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import resource
 import tempfile
 import time
@@ -19,14 +20,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import settings
 from app.database import get_db
-from app.models import Conversation, Message, RcaInput, RcaPrompt, RcaResult, RcaRun, RcaStep
+from app.models import Conversation, Message, RcaHumanEvaluation, RcaInput, RcaPrompt, RcaResult, RcaRun, RcaStep
 from app.schemas import RcaPromptCreate, RcaPromptResponse, RcaRunNormalRequest, RcaRunNormalResponse
 from app.llm_debug import prompt_debug_event
 from app.rca.analyzer import RcaAnalysis, analyze
@@ -157,6 +158,51 @@ def _extract_chat_content(payload: dict[str, Any]) -> str:
         if value:
             return str(value)
     return ""
+
+
+_TOTAL_RECORD_RE = re.compile(r"총\s*레코드:\s*([\d,]+)")
+
+
+def _input_record_count(text: str) -> int | None:
+    match = _TOTAL_RECORD_RE.search(text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _preview_text(text: str, limit: int = 240) -> str:
+    normalized = text.replace("\\n", "\n").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip() + "..."
+
+
+def _score_values(result: RcaResult | None) -> list[float]:
+    if not result:
+        return []
+    values = [
+        result.accuracy_score,
+        result.reasoning_score,
+        result.evidence_score,
+        result.actionability_score,
+    ]
+    return [float(v) for v in values if v is not None]
+
+
+def _overall_score(result: RcaResult | None) -> float | None:
+    values = _score_values(result)
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
+
+
+def _run_status(step: RcaStep | None) -> str:
+    if not step:
+        return "READY"
+    return "SUCCESS" if step.result_id else "FAILED"
 
 
 def _rss_mb() -> float:
@@ -551,6 +597,315 @@ async def run_normal_rca_experiment(
     except Exception as exc:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"RCA normal run 실패: {exc}") from exc
+
+
+@router.get("/lab/inputs")
+async def list_rca_lab_inputs(db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(RcaInput).order_by(RcaInput.input_id.desc()))).scalars().all()
+    return [
+        {
+            "input_id": row.input_id,
+            "input_name": row.input_name,
+            "description": _preview_text(row.text, 120),
+            "record_count": _input_record_count(row.text),
+            "status": "READY",
+            "hash": row.hash,
+            "priority": row.priority,
+            "update_dt": row.update_dt,
+            "text_length": len(row.text or ""),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/lab/inputs/{input_id}")
+async def get_rca_lab_input(input_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(RcaInput).where(RcaInput.input_id == input_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA input을 찾을 수 없습니다")
+    return {
+        "input_id": row.input_id,
+        "input_name": row.input_name,
+        "description": _preview_text(row.text, 240),
+        "record_count": _input_record_count(row.text),
+        "status": "READY",
+        "hash": row.hash,
+        "priority": row.priority,
+        "update_dt": row.update_dt,
+        "text": row.text,
+        "text_length": len(row.text or ""),
+    }
+
+
+@router.delete("/lab/inputs/{input_id}")
+async def delete_rca_lab_input(input_id: int, db: AsyncSession = Depends(get_db)):
+    linked_steps = await db.scalar(select(func.count()).select_from(RcaStep).where(RcaStep.input_id == input_id))
+    if linked_steps:
+        raise HTTPException(status_code=409, detail="실행 이력이 연결된 INPUT은 삭제할 수 없습니다")
+    row = await db.scalar(select(RcaInput).where(RcaInput.input_id == input_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA input을 찾을 수 없습니다")
+    await db.delete(row)
+    await db.commit()
+    return {"success": True}
+
+
+@router.post("/lab/inputs/import-sample")
+async def import_rca_lab_sample_input(
+    chunk_size: int = Body(10000),
+    input_name: str | None = Body(None),
+    priority: int = Body(0),
+    model: str = Body(RCA_MODEL),
+    db: AsyncSession = Depends(get_db),
+):
+    sample_file_path = _sample_file_path()
+    return await _import_rca_inputs_from_path(
+        filepath=str(sample_file_path),
+        filename=sample_file_path.name,
+        chunk_size=chunk_size,
+        input_name=input_name,
+        priority=priority,
+        model=model or RCA_MODEL,
+        db=db,
+    )
+
+
+@router.get("/lab/prompts")
+async def list_rca_lab_prompts(db: AsyncSession = Depends(get_db)):
+    prompts = (await db.execute(select(RcaPrompt).order_by(RcaPrompt.prompt_id.desc()))).scalars().all()
+    items = []
+    for prompt in prompts:
+        steps = (
+            await db.execute(
+                select(RcaStep, RcaResult)
+                .outerjoin(RcaResult, RcaResult.result_id == RcaStep.result_id)
+                .where(RcaStep.prompt_id == prompt.prompt_id)
+            )
+        ).all()
+        scores = [_overall_score(result) for _step, result in steps]
+        scores = [score for score in scores if score is not None]
+        items.append({
+            "prompt_id": prompt.prompt_id,
+            "prompt_name": f"PROMPT_{prompt.prompt_id:04d}",
+            "version": f"v{prompt.prompt_id}",
+            "parent_prompt": None,
+            "status": "ACTIVE",
+            "hash": prompt.hash,
+            "priority": prompt.priority,
+            "update_dt": prompt.update_dt,
+            "execution_count": len(steps),
+            "average_score": round(sum(scores) / len(scores), 2) if scores else None,
+            "best_score": max(scores) if scores else None,
+            "worst_score": min(scores) if scores else None,
+            "text_preview": _preview_text(prompt.text, 160),
+        })
+    return items
+
+
+@router.get("/lab/prompts/{prompt_id}")
+async def get_rca_lab_prompt(prompt_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == prompt_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+    return {
+        "prompt_id": row.prompt_id,
+        "prompt_name": f"PROMPT_{row.prompt_id:04d}",
+        "version": f"v{row.prompt_id}",
+        "parent_prompt": None,
+        "status": "ACTIVE",
+        "hash": row.hash,
+        "priority": row.priority,
+        "update_dt": row.update_dt,
+        "text": row.text,
+    }
+
+
+@router.post("/lab/prompts")
+async def create_rca_lab_prompt(payload: dict[str, Any], db: AsyncSession = Depends(get_db)):
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Prompt text가 비어 있습니다")
+    prompt, created = await _get_or_create_rca_prompt(
+        db,
+        text=text,
+        priority=int(payload.get("priority") or 0),
+    )
+    await db.commit()
+    await db.refresh(prompt)
+    return {"success": True, "created": created, "prompt_id": prompt.prompt_id, "hash": prompt.hash}
+
+
+@router.put("/lab/prompts/{prompt_id}")
+async def update_rca_lab_prompt(prompt_id: int, payload: dict[str, Any], db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == prompt_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Prompt text가 비어 있습니다")
+    row.text = text
+    row.hash = _sha256_text(text)
+    row.priority = int(payload.get("priority") if payload.get("priority") is not None else row.priority)
+    await db.commit()
+    await db.refresh(row)
+    return {"success": True, "prompt_id": row.prompt_id, "hash": row.hash}
+
+
+@router.delete("/lab/prompts/{prompt_id}")
+async def delete_rca_lab_prompt(prompt_id: int, db: AsyncSession = Depends(get_db)):
+    linked_steps = await db.scalar(select(func.count()).select_from(RcaStep).where(RcaStep.prompt_id == prompt_id))
+    if linked_steps:
+        raise HTTPException(status_code=409, detail="실행 이력이 연결된 Prompt는 삭제할 수 없습니다")
+    row = await db.scalar(select(RcaPrompt).where(RcaPrompt.prompt_id == prompt_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA prompt를 찾을 수 없습니다")
+    await db.delete(row)
+    await db.commit()
+    return {"success": True}
+
+
+@router.post("/lab/experiments")
+async def run_rca_lab_experiment(payload: dict[str, Any], db: AsyncSession = Depends(get_db)):
+    input_id = int(payload.get("input_id") or 0)
+    prompt_id = int(payload.get("prompt_id") or 0)
+    model = str(payload.get("model") or RCA_MODEL)
+    count = max(1, min(int(payload.get("count") or 1), 100))
+    result_ids: list[int] = []
+    run_ids: list[int] = []
+
+    for _ in range(count):
+        result = await run_normal_rca_experiment(
+            RcaRunNormalRequest(input_id=input_id, prompt_id=prompt_id, model=model),
+            db,
+        )
+        result_ids.append(result.result_id)
+        run_ids.append(result.run_id)
+    return {
+        "success": True,
+        "created_count": len(result_ids),
+        "run_ids": run_ids,
+        "result_ids": result_ids,
+    }
+
+
+@router.get("/lab/experiments")
+async def list_rca_lab_experiments(db: AsyncSession = Depends(get_db)):
+    rows = (
+        await db.execute(
+            select(RcaRun, RcaStep, RcaInput, RcaPrompt, RcaResult)
+            .join(RcaStep, RcaStep.run_id == RcaRun.run_id)
+            .join(RcaInput, RcaInput.input_id == RcaStep.input_id)
+            .join(RcaPrompt, RcaPrompt.prompt_id == RcaStep.prompt_id)
+            .outerjoin(RcaResult, RcaResult.result_id == RcaStep.result_id)
+            .order_by(RcaRun.run_id.desc())
+            .limit(300)
+        )
+    ).all()
+    return [
+        {
+            "experiment_id": run.run_id,
+            "run_id": run.run_id,
+            "step_id": step.step_id,
+            "run_mode": run.run_mode,
+            "input_id": step.input_id,
+            "input_name": rca_input.input_name,
+            "prompt_id": step.prompt_id,
+            "prompt_name": f"PROMPT_{step.prompt_id:04d}",
+            "result_id": step.result_id,
+            "model": RCA_MODEL,
+            "run_count": 1,
+            "status": _run_status(step),
+            "score": _overall_score(result),
+            "update_dt": run.update_dt,
+        }
+        for run, step, rca_input, _prompt, result in rows
+    ]
+
+
+@router.get("/lab/results/compare")
+async def compare_rca_lab_results(input_id: int | None = None, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(RcaStep, RcaInput, RcaPrompt, RcaResult)
+        .join(RcaInput, RcaInput.input_id == RcaStep.input_id)
+        .join(RcaPrompt, RcaPrompt.prompt_id == RcaStep.prompt_id)
+        .join(RcaResult, RcaResult.result_id == RcaStep.result_id)
+        .order_by(RcaStep.step_id.desc())
+        .limit(300)
+    )
+    if input_id:
+        stmt = stmt.where(RcaStep.input_id == input_id)
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "step_id": step.step_id,
+            "input_id": step.input_id,
+            "input_name": rca_input.input_name,
+            "prompt_id": step.prompt_id,
+            "prompt_name": f"PROMPT_{step.prompt_id:04d}",
+            "result_id": result.result_id,
+            "score": _overall_score(result),
+            "accuracy_score": result.accuracy_score,
+            "reasoning_score": result.reasoning_score,
+            "evidence_score": result.evidence_score,
+            "actionability_score": result.actionability_score,
+            "accuracy_comment": result.accuracy_comment,
+            "reasoning_comment": result.reasoning_comment,
+            "evidence_comment": result.evidence_comment,
+            "actionability_comment": result.actionability_comment,
+            "evaluation_comment": result.evaluation_comment,
+            "result_preview": _preview_text(result.text, 300),
+            "update_dt": result.update_dt,
+        }
+        for step, rca_input, _prompt, result in rows
+    ]
+
+
+@router.get("/lab/results/{result_id}")
+async def get_rca_lab_result(result_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(RcaResult).where(RcaResult.result_id == result_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="RCA result를 찾을 수 없습니다")
+    return {
+        "result_id": row.result_id,
+        "text": row.text,
+        "score": _overall_score(row),
+        "accuracy_score": row.accuracy_score,
+        "reasoning_score": row.reasoning_score,
+        "evidence_score": row.evidence_score,
+        "actionability_score": row.actionability_score,
+        "accuracy_comment": row.accuracy_comment,
+        "reasoning_comment": row.reasoning_comment,
+        "evidence_comment": row.evidence_comment,
+        "actionability_comment": row.actionability_comment,
+        "evaluation_comment": row.evaluation_comment,
+        "update_dt": row.update_dt,
+    }
+
+
+@router.post("/lab/results/{result_id}/human-evaluation")
+async def create_rca_lab_human_evaluation(
+    result_id: int,
+    payload: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.scalar(select(RcaResult).where(RcaResult.result_id == result_id))
+    if not result:
+        raise HTTPException(status_code=404, detail="RCA result를 찾을 수 없습니다")
+    rating = str(payload.get("rating") or "").strip().upper()
+    if rating not in {"GOOD", "NORMAL", "BAD", "A", "B"}:
+        raise HTTPException(status_code=422, detail="rating은 GOOD/NORMAL/BAD/A/B 중 하나여야 합니다")
+    selected_result_id = payload.get("selected_result_id")
+    row = RcaHumanEvaluation(
+        result_id=result_id,
+        selected_result_id=int(selected_result_id) if selected_result_id else None,
+        rating=rating,
+        comment=str(payload.get("comment") or "").strip() or None,
+        evaluator=str(payload.get("evaluator") or "human"),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {"success": True, "evaluation_id": row.evaluation_id}
 
 
 @sample_router.post("/sample")

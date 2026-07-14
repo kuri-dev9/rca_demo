@@ -268,6 +268,188 @@ export function streamRcaReport(
   return controller;
 }
 
+// ── RCA Lab ──────────────────────────────────────────────────────────────────
+
+export interface RcaLabInput {
+  input_id: number;
+  input_name: string;
+  description: string;
+  record_count?: number | null;
+  status: string;
+  hash: string;
+  priority: number;
+  update_dt: string;
+  text_length: number;
+  text?: string;
+}
+
+export interface RcaLabPrompt {
+  prompt_id: number;
+  prompt_name: string;
+  version: string;
+  parent_prompt?: string | null;
+  status: string;
+  hash: string;
+  priority: number;
+  update_dt: string;
+  execution_count?: number;
+  average_score?: number | null;
+  best_score?: number | null;
+  worst_score?: number | null;
+  text_preview?: string;
+  text?: string;
+}
+
+export interface RcaLabExperiment {
+  experiment_id: number;
+  run_id: number;
+  step_id: number;
+  run_mode: string;
+  input_id: number;
+  input_name: string;
+  prompt_id: number;
+  prompt_name: string;
+  result_id?: number | null;
+  model: string;
+  run_count: number;
+  status: string;
+  score?: number | null;
+  update_dt: string;
+}
+
+export interface RcaLabResult {
+  step_id?: number;
+  input_id?: number;
+  input_name?: string;
+  prompt_id?: number;
+  prompt_name?: string;
+  result_id: number;
+  score?: number | null;
+  accuracy_score?: number | null;
+  reasoning_score?: number | null;
+  evidence_score?: number | null;
+  actionability_score?: number | null;
+  accuracy_comment?: string | null;
+  reasoning_comment?: string | null;
+  evidence_comment?: string | null;
+  actionability_comment?: string | null;
+  evaluation_comment?: string | null;
+  result_preview?: string;
+  text?: string;
+  update_dt: string;
+}
+
+async function jsonOrThrow(res: Response, fallback: string) {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail || data.message || fallback);
+  }
+  return data;
+}
+
+export async function fetchRcaLabInputs(): Promise<RcaLabInput[]> {
+  const res = await fetch(`${API_BASE}/rca/lab/inputs`);
+  return jsonOrThrow(res, 'RCA Lab INPUT 조회 실패');
+}
+
+export async function fetchRcaLabInput(id: number): Promise<RcaLabInput> {
+  const res = await fetch(`${API_BASE}/rca/lab/inputs/${id}`);
+  return jsonOrThrow(res, 'RCA Lab INPUT 상세 조회 실패');
+}
+
+export async function importRcaLabSample(chunkSize = 10000) {
+  const res = await fetch(`${API_BASE}/rca/lab/inputs/import-sample`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chunk_size: chunkSize }),
+  });
+  return jsonOrThrow(res, '샘플 INPUT 생성 실패');
+}
+
+export async function importRcaLabFile(file: File, chunkSize = 10000, inputName?: string) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('chunk_size', String(chunkSize));
+  if (inputName) formData.append('input_name', inputName);
+  const res = await fetch(`${API_BASE}/rca/input/import`, {
+    method: 'POST',
+    body: formData,
+  });
+  return jsonOrThrow(res, 'RCA INPUT 파일 생성 실패');
+}
+
+export async function deleteRcaLabInput(id: number) {
+  const res = await fetch(`${API_BASE}/rca/lab/inputs/${id}`, { method: 'DELETE' });
+  return jsonOrThrow(res, 'RCA Lab INPUT 삭제 실패');
+}
+
+export async function fetchRcaLabPrompts(): Promise<RcaLabPrompt[]> {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts`);
+  return jsonOrThrow(res, 'RCA Lab Prompt 조회 실패');
+}
+
+export async function fetchRcaLabPrompt(id: number): Promise<RcaLabPrompt> {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts/${id}`);
+  return jsonOrThrow(res, 'RCA Lab Prompt 상세 조회 실패');
+}
+
+export async function createRcaLabPrompt(text: string) {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  return jsonOrThrow(res, 'RCA Lab Prompt 등록 실패');
+}
+
+export async function updateRcaLabPrompt(id: number, text: string) {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  return jsonOrThrow(res, 'RCA Lab Prompt 수정 실패');
+}
+
+export async function deleteRcaLabPrompt(id: number) {
+  const res = await fetch(`${API_BASE}/rca/lab/prompts/${id}`, { method: 'DELETE' });
+  return jsonOrThrow(res, 'RCA Lab Prompt 삭제 실패');
+}
+
+export async function runRcaLabExperiment(inputId: number, promptId: number, model: string, count: number) {
+  const res = await fetch(`${API_BASE}/rca/lab/experiments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input_id: inputId, prompt_id: promptId, model, count }),
+  });
+  return jsonOrThrow(res, 'RCA Lab Experiment 실행 실패');
+}
+
+export async function fetchRcaLabExperiments(): Promise<RcaLabExperiment[]> {
+  const res = await fetch(`${API_BASE}/rca/lab/experiments`);
+  return jsonOrThrow(res, 'RCA Lab Experiment 이력 조회 실패');
+}
+
+export async function fetchRcaLabResults(inputId?: number): Promise<RcaLabResult[]> {
+  const query = inputId ? `?input_id=${inputId}` : '';
+  const res = await fetch(`${API_BASE}/rca/lab/results/compare${query}`);
+  return jsonOrThrow(res, 'RCA Lab Result 비교 조회 실패');
+}
+
+export async function fetchRcaLabResult(id: number): Promise<RcaLabResult> {
+  const res = await fetch(`${API_BASE}/rca/lab/results/${id}`);
+  return jsonOrThrow(res, 'RCA Lab Result 상세 조회 실패');
+}
+
+export async function createRcaLabHumanEvaluation(resultId: number, rating: string, comment: string) {
+  const res = await fetch(`${API_BASE}/rca/lab/results/${resultId}/human-evaluation`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rating, comment }),
+  });
+  return jsonOrThrow(res, 'Human 평가 저장 실패');
+}
+
 export function streamRcaReasoning(
   convId: number,
   hallucinationStep2: boolean,

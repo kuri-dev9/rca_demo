@@ -110,6 +110,14 @@ class RcaResult(Base):
 
     result_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     text: Mapped[str] = mapped_column(LONG_TEXT)
+    accuracy_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reasoning_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    actionability_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    accuracy_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reasoning_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    actionability_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     hallucination_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     over_confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     evidence_missing_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -139,3 +147,19 @@ class RcaStep(Base):
     input: Mapped["RcaInput"] = relationship()
     prompt: Mapped["RcaPrompt"] = relationship()
     result: Mapped[Optional["RcaResult"]] = relationship()
+
+
+class RcaHumanEvaluation(Base):
+    __tablename__ = "PR_RCA_HUMAN_EVAL"
+
+    evaluation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    result_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("PR_RCA_RESULT.result_id", ondelete="CASCADE"))
+    rating: Mapped[str] = mapped_column(String(20))
+    selected_result_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("PR_RCA_RESULT.result_id"), nullable=True)
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evaluator: Mapped[str] = mapped_column(String(100), default="human")
+    update_dt: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    result: Mapped["RcaResult"] = relationship(foreign_keys=[result_id])

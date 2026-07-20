@@ -1,886 +1,214 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  analyzeRcaLabPrompt,
-  compareRcaLabPrompts,
-  createRcaLabHumanEvaluation,
-  createRcaLabPrompt,
-  deleteRcaLabInput,
-  deleteRcaLabPrompt,
-  evaluateRcaLabResult,
-  fetchRcaLabExperiments,
-  fetchRcaLabEvaluation,
-  fetchRcaLabInput,
-  fetchRcaLabInputs,
-  fetchRcaLabPrompt,
-  fetchRcaLabPromptComments,
-  fetchRcaLabPromptPerformance,
-  fetchRcaLabPrompts,
-  fetchRcaLabPromptStats,
-  fetchRcaLabResult,
-  fetchRcaLabResults,
-  importRcaLabFile,
-  importRcaLabSample,
-  RcaLabExperiment,
-  RcaLabEvaluationDetail,
-  RcaLabInput,
-  RcaLabJudge,
-  RcaLabMetaAnalysis,
-  RcaLabPrompt,
-  RcaLabPromptComparison,
-  RcaLabPromptStats,
-  RcaLabResult,
-  runRcaLabExperiment,
-  updateRcaLabPrompt,
+  analyzeRcaLabPrompt, compareRcaLabPrompts, createRcaLabHumanEvaluation,
+  createRcaLabPrompt, deleteRcaLabInput, deleteRcaLabPrompt, evaluateRcaLabResult,
+  fetchRcaLabEvaluation, fetchRcaLabExperiments, fetchRcaLabInput, fetchRcaLabInputs,
+  fetchRcaLabPrompt, fetchRcaLabPrompts, fetchRcaLabResult, fetchRcaLabResults,
+  importRcaLabFile, importRcaLabSample, RcaLabEvaluationDetail, RcaLabExperiment,
+  RcaLabInput, RcaLabJudge, RcaLabMetaAnalysis, RcaLabPrompt, RcaLabPromptComparison,
+  RcaLabPromptStats, RcaLabResult, runRcaLabExperiment, updateRcaLabPrompt,
 } from '../api';
 
-type Tab = 'inputs' | 'prompts' | 'experiments' | 'results' | 'meta' | 'human';
+interface Props { models: { name: string }[]; selectedModel: string; }
+type ModalContent = { title: string; content: React.ReactNode } | null;
 
-interface Props {
-  models: { name: string }[];
-  selectedModel: string;
-}
-
-function formatDate(value?: string) {
-  if (!value) return '-';
-  return new Date(value).toLocaleString();
-}
-
-function formatScore(value?: number | null) {
-  return value === null || value === undefined ? '-' : value.toFixed(1);
-}
+const formatDate = (value?: string) => value ? new Date(value).toLocaleString() : '-';
+const formatScore = (value?: number | null) => value == null ? '-' : value.toFixed(1);
 
 export default function RcaLab({ models, selectedModel }: Props) {
-  const [tab, setTab] = useState<Tab>('inputs');
   const [inputs, setInputs] = useState<RcaLabInput[]>([]);
   const [prompts, setPrompts] = useState<RcaLabPrompt[]>([]);
   const [experiments, setExperiments] = useState<RcaLabExperiment[]>([]);
   const [results, setResults] = useState<RcaLabResult[]>([]);
-  const [promptPerformance, setPromptPerformance] = useState<RcaLabPromptStats[]>([]);
-  const [selectedInput, setSelectedInput] = useState<RcaLabInput | null>(null);
-  const [selectedPrompt, setSelectedPrompt] = useState<RcaLabPrompt | null>(null);
-  const [selectedPromptStats, setSelectedPromptStats] = useState<RcaLabPromptStats | null>(null);
-  const [selectedPromptComments, setSelectedPromptComments] = useState<{ comment: string; count: number }[]>([]);
+  const [activeResultId, setActiveResultId] = useState<number | null>(null);
+  const [evaluation, setEvaluation] = useState<RcaLabEvaluationDetail | null>(null);
   const [selectedResult, setSelectedResult] = useState<RcaLabResult | null>(null);
-  const [evaluationDetail, setEvaluationDetail] = useState<RcaLabEvaluationDetail | null>(null);
   const [metaAnalysis, setMetaAnalysis] = useState<RcaLabMetaAnalysis | null>(null);
   const [promptComparison, setPromptComparison] = useState<RcaLabPromptComparison | null>(null);
-  const [promptText, setPromptText] = useState('');
-  const [experimentInputId, setExperimentInputId] = useState('');
-  const [experimentPromptId, setExperimentPromptId] = useState('');
+  const [inputId, setInputId] = useState('');
+  const [promptId, setPromptId] = useState('');
   const [experimentModel, setExperimentModel] = useState(selectedModel);
   const [experimentCount, setExperimentCount] = useState(1);
-  const [compareInputId, setCompareInputId] = useState('');
-  const [compareModel, setCompareModel] = useState('');
-  const [metaPromptId, setMetaPromptId] = useState('');
-  const [leftComparePromptId, setLeftComparePromptId] = useState('');
-  const [rightComparePromptId, setRightComparePromptId] = useState('');
   const [inputChunkSize, setInputChunkSize] = useState(10000);
+  const [promptText, setPromptText] = useState('');
+  const [editingPrompt, setEditingPrompt] = useState<RcaLabPrompt | null>(null);
   const [humanRating, setHumanRating] = useState('GOOD');
   const [humanComment, setHumanComment] = useState('');
-  const [experimentStatus, setExperimentStatus] = useState<'READY' | 'RUNNING' | 'SCORING' | 'COMPLETED' | 'FAILED'>('READY');
-  const [experimentProgress, setExperimentProgress] = useState(0);
-  const [experimentProgressText, setExperimentProgressText] = useState('READY');
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    input: true,
-    prompt: true,
-    result: true,
-    score: true,
-    comment: true,
-    judges: true,
-  });
-  const [evaluatingJudge, setEvaluatingJudge] = useState<Record<string, boolean>>({});
-  const [expandedJudgeId, setExpandedJudgeId] = useState<number | null>(null);
+  const [compareResultId, setCompareResultId] = useState('');
+  const [comparePromptId, setComparePromptId] = useState('');
+  const [modal, setModal] = useState<ModalContent>(null);
+  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [progress, setProgress] = useState(0);
+  const [progressText, setProgressText] = useState('READY');
+  const [evaluating, setEvaluating] = useState<Record<string, boolean>>({});
 
-  const defaultResultId = useMemo(() => results[0]?.result_id || '', [results]);
+  const activeResult = useMemo(
+    () => results.find((item) => item.result_id === activeResultId) || selectedResult,
+    [results, activeResultId, selectedResult],
+  );
+  const activeExperiment = useMemo(() => experiments.find((item) => item.result_id === activeResultId), [experiments, activeResultId]);
 
   const refreshAll = async () => {
-    const currentInputId = compareInputId ? Number(compareInputId) : undefined;
-    const currentModel = compareModel || undefined;
-    const [nextInputs, nextPrompts, nextExperiments, nextResults, nextPerformance] = await Promise.all([
-      fetchRcaLabInputs(),
-      fetchRcaLabPrompts(),
-      fetchRcaLabExperiments(),
-      fetchRcaLabResults(currentInputId, currentModel),
-      fetchRcaLabPromptPerformance(currentInputId, currentModel),
+    const [nextInputs, nextPrompts, nextExperiments, nextResults] = await Promise.all([
+      fetchRcaLabInputs(), fetchRcaLabPrompts(), fetchRcaLabExperiments(),
+      fetchRcaLabResults(),
     ]);
-    setInputs(nextInputs);
-    setPrompts(nextPrompts);
-    setExperiments(nextExperiments);
+    setInputs(nextInputs); setPrompts(nextPrompts); setExperiments(nextExperiments);
     setResults(nextResults);
-    setPromptPerformance(nextPerformance);
-    if (!experimentInputId && nextInputs[0]) setExperimentInputId(String(nextInputs[0].input_id));
-    if (!experimentPromptId && nextPrompts[0]) setExperimentPromptId(String(nextPrompts[0].prompt_id));
-    if (!metaPromptId && nextPrompts[0]) setMetaPromptId(String(nextPrompts[0].prompt_id));
-    if (!leftComparePromptId && nextPrompts[0]) setLeftComparePromptId(String(nextPrompts[0].prompt_id));
-    if (!rightComparePromptId && nextPrompts[1]) setRightComparePromptId(String(nextPrompts[1].prompt_id));
+    if (!inputId && nextInputs[0]) setInputId(String(nextInputs[0].input_id));
+    if (!promptId && nextPrompts[0]) setPromptId(String(nextPrompts[0].prompt_id));
+    setActiveResultId((current) => current && nextResults.some((item) => item.result_id === current) ? current : nextResults[0]?.result_id || null);
   };
 
+  useEffect(() => { refreshAll().catch((err) => setMessage(err.message || 'RCA Lab 로딩 실패')); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setExperimentModel(selectedModel); }, [selectedModel]);
   useEffect(() => {
-    refreshAll().catch((err) => setMessage(err.message || 'RCA Lab 로딩 실패'));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!activeResultId) { setEvaluation(null); setSelectedResult(null); return; }
+    Promise.all([fetchRcaLabResult(activeResultId), fetchRcaLabEvaluation(activeResultId)])
+      .then(([result, detail]) => { setSelectedResult(result); setEvaluation(detail); setInputId(String(detail.input.input_id)); setPromptId(String(detail.prompt.prompt_id)); })
+      .catch((err) => setMessage(err.message || 'Session 상세 조회 실패'));
+  }, [activeResultId]);
 
-  useEffect(() => {
-    setExperimentModel(selectedModel);
-  }, [selectedModel]);
+  const action = async (work: () => Promise<void>) => {
+    setLoading(true); setMessage('');
+    try { await work(); await refreshAll(); }
+    catch (err: any) { setMessage(err.message || '작업에 실패했습니다.'); }
+    finally { setLoading(false); }
+  };
 
-  useEffect(() => {
-    if (tab === 'human' && !evaluationDetail && defaultResultId) {
-      handleShowResult(Number(defaultResultId)).catch((err) => setMessage(err.message || '평가 상세 조회 실패'));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, defaultResultId]);
+  const selectSession = (id: number) => { setActiveResultId(id); setMobileSessionsOpen(false); setMetaAnalysis(null); setPromptComparison(null); };
+  const showText = (title: string, content?: string | null) => setModal({ title, content: <pre className="rca-pipeline-raw">{content || '내용이 없습니다.'}</pre> });
 
-  const runAction = async (action: () => Promise<void>) => {
-    setLoading(true);
-    setMessage('');
+  const runExperiment = async () => {
+    if (!inputId || !promptId) return;
+    setLoading(true); setMessage(''); setProgress(0); setProgressText('RCA 실행 준비 중');
     try {
-      await action();
+      for (let index = 0; index < experimentCount; index += 1) {
+        setProgress(Math.round((index / experimentCount) * 100));
+        setProgressText(`${index + 1} / ${experimentCount} RCA 실행 중`);
+        await runRcaLabExperiment(Number(inputId), Number(promptId), experimentModel, 1);
+      }
+      setProgress(100); setProgressText('Judge 평가까지 완료'); setMessage('Experiment 실행을 완료했습니다.');
       await refreshAll();
-    } catch (err: any) {
-      setMessage(err.message || '작업 실패');
-    } finally {
-      setLoading(false);
-    }
+    } catch (err: any) { setProgressText('FAILED'); setMessage(err.message || 'Experiment 실행 실패'); }
+    finally { setLoading(false); }
   };
 
-  const handleShowInput = async (id: number) => {
-    const detail = await fetchRcaLabInput(id);
-    setSelectedInput(detail);
+  const openPromptEditor = async (id?: number) => {
+    if (!id) { setEditingPrompt(null); setPromptText('\n'); return; }
+    const detail = await fetchRcaLabPrompt(id);
+    setEditingPrompt(detail); setPromptText(detail.text || '');
   };
 
-  const handleShowPrompt = async (id: number) => {
-    const [detail, stats, comments] = await Promise.all([
-      fetchRcaLabPrompt(id),
-      fetchRcaLabPromptStats(id),
-      fetchRcaLabPromptComments(id),
-    ]);
-    setSelectedPrompt(detail);
-    setSelectedPromptStats(stats);
-    setSelectedPromptComments(comments.comment_frequency);
-    setPromptText(detail.text || '');
+  const savePrompt = () => action(async () => {
+    if (editingPrompt) await updateRcaLabPrompt(editingPrompt.prompt_id, promptText);
+    else await createRcaLabPrompt(promptText);
+    setEditingPrompt(null); setPromptText(''); setMessage('Prompt를 저장했습니다.');
+  });
+
+  const analyzePrompt = () => action(async () => {
+    const target = evaluation?.prompt.prompt_id || Number(promptId);
+    if (!target) throw new Error('분석할 Prompt가 없습니다.');
+    setMetaAnalysis(await analyzeRcaLabPrompt(target)); setMessage('Meta Analyzer 분석을 완료했습니다.');
+  });
+
+  const compare = () => action(async () => {
+    if (!evaluation || !comparePromptId) throw new Error('비교할 Prompt를 선택하세요.');
+    const comparison = await compareRcaLabPrompts(evaluation.prompt.prompt_id, Number(comparePromptId), evaluation.input.input_id, activeResult?.model || undefined);
+    setPromptComparison(comparison);
+    setModal({ title: `Result #${activeResultId} Compare`, content: renderComparison(comparison) });
+  });
+
+  const saveHumanReview = () => action(async () => {
+    if (!activeResultId) throw new Error('평가할 Session을 선택하세요.');
+    await createRcaLabHumanEvaluation(activeResultId, humanRating, humanComment);
+    setEvaluation(await fetchRcaLabEvaluation(activeResultId)); setHumanComment(''); setMessage('Human Override를 저장했습니다.');
+  });
+
+  const evaluateJudge = async (type: 'LOCAL' | 'CLAUDE') => {
+    if (!activeResultId || evaluating[type]) return;
+    setEvaluating((prev) => ({ ...prev, [type]: true })); setMessage(`${type} 평가 중...`);
+    try { await evaluateRcaLabResult(activeResultId, type); setEvaluation(await fetchRcaLabEvaluation(activeResultId)); setMessage(`${type} 평가가 완료되었습니다.`); }
+    catch (err: any) { setMessage(err.message || `${type} 평가 실패`); }
+    finally { setEvaluating((prev) => ({ ...prev, [type]: false })); }
   };
 
-  const handleShowResult = async (id: number) => {
-    const [detail, evaluation] = await Promise.all([
-      fetchRcaLabResult(id),
-      fetchRcaLabEvaluation(id),
-    ]);
-    setSelectedResult(detail);
-    setEvaluationDetail(evaluation);
+  const latestJudges = (rows: RcaLabJudge[] = []) => {
+    const map = new Map<string, RcaLabJudge>(); rows.forEach((row) => { if (!map.has(row.judge_type)) map.set(row.judge_type, row); });
+    return Array.from(map.values());
   };
 
-  const handlePromptSave = async () => {
-    await runAction(async () => {
-      if (selectedPrompt) {
-        await updateRcaLabPrompt(selectedPrompt.prompt_id, promptText);
-        setMessage('Prompt를 수정했습니다.');
-      } else {
-        await createRcaLabPrompt(promptText);
-        setMessage('Prompt를 등록했습니다.');
-      }
-      setSelectedPrompt(null);
-      setPromptText('');
-    });
-  };
+  const metrics = (stats?: RcaLabPromptStats | null) => <div className="rca-pipeline-metrics">
+    {[['Total', stats?.average_score], ['Accuracy', stats?.accuracy_average], ['Reasoning', stats?.reasoning_average], ['Evidence', stats?.evidence_average], ['Action', stats?.actionability_average]].map(([label, value]) =>
+      <div key={String(label)}><span>{label}</span><strong>{formatScore(value as number | null | undefined)}</strong></div>)}
+  </div>;
 
-  const handleInputFileImport = async (file?: File | null) => {
-    if (!file) return;
-    await runAction(async () => {
-      await importRcaLabFile(file, inputChunkSize, file.name);
-      setMessage('파일 INPUT 생성을 완료했습니다.');
-    });
-  };
+  function renderComparison(comparison = promptComparison) {
+    if (!comparison) return <div className="rca-pipeline-empty">비교를 실행하면 결과가 표시됩니다.</div>;
+    return <div className="rca-compare-content"><p>{comparison.change_summary}</p>{metrics(comparison.right.stats)}
+      <table className="rca-pipeline-table"><thead><tr><th>Metric</th><th>{comparison.left.prompt_name}</th><th>{comparison.right.prompt_name}</th><th>Delta</th></tr></thead><tbody>
+        {[['Total','average_score','total_score'],['Accuracy','accuracy_average','accuracy'],['Reasoning','reasoning_average','reasoning'],['Evidence','evidence_average','evidence'],['Action','actionability_average','actionability']].map(([label,key,delta]) => <tr key={label}><td>{label}</td><td>{formatScore((comparison.left.stats as any)[key])}</td><td>{formatScore((comparison.right.stats as any)[key])}</td><td>{formatScore(comparison.deltas[delta])}</td></tr>)}
+      </tbody></table></div>;
+  }
 
-  const handleRunExperiment = async () => {
-    setLoading(true);
-    setMessage('');
-    setExperimentStatus('RUNNING');
-    setExperimentProgress(0);
-    setExperimentProgressText(`0 / ${experimentCount}`);
-    try {
-      for (let i = 0; i < experimentCount; i += 1) {
-        setExperimentStatus('RUNNING');
-        setExperimentProgress(Math.round((i / experimentCount) * 100));
-        setExperimentProgressText(`${i} / ${experimentCount} RCA 실행 중`);
-        await runRcaLabExperiment(
-          Number(experimentInputId),
-          Number(experimentPromptId),
-          experimentModel,
-          1,
-        );
-        setExperimentStatus('SCORING');
-        setExperimentProgress(Math.round(((i + 1) / experimentCount) * 100));
-        setExperimentProgressText(`${i + 1} / ${experimentCount} LOCAL / CLAUDE Judge 반영`);
-        await refreshAll();
-      }
-      setExperimentStatus('COMPLETED');
-      setExperimentProgress(100);
-      setExperimentProgressText('COMPLETED');
-      if (metaAnalysis && metaPromptId) {
-        setMetaAnalysis(await analyzeRcaLabPrompt(Number(metaPromptId)));
-      }
-      if (promptComparison && leftComparePromptId && rightComparePromptId) {
-        setPromptComparison(await compareRcaLabPrompts(
-          Number(leftComparePromptId),
-          Number(rightComparePromptId),
-          compareInputId ? Number(compareInputId) : undefined,
-          compareModel || undefined,
-        ));
-      }
-      setMessage('Experiment 실행과 LOCAL / CLAUDE Judge 평가가 완료되었습니다.');
-    } catch (err: any) {
-      setExperimentStatus('FAILED');
-      setExperimentProgressText('FAILED');
-      setMessage(err.message || 'Experiment 실행 실패');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const Card = ({ step, title, children }: { step: number; title: string; children: React.ReactNode }) => <section className="rca-pipeline-card">
+    <div className="rca-pipeline-card-head"><span className="rca-step-number">{step}</span><div><small>RCA PIPELINE</small><h2>{title}</h2></div></div>
+    <div className="rca-pipeline-card-body">{children}</div>
+  </section>;
 
-  const handleHumanSave = async () => {
-    const resultId = selectedResult?.result_id || Number(defaultResultId);
-    if (!resultId) {
-      setMessage('평가할 Result를 선택하세요.');
-      return;
-    }
-    await runAction(async () => {
-      await createRcaLabHumanEvaluation(resultId, humanRating, humanComment);
-      const evaluation = await fetchRcaLabEvaluation(resultId);
-      setEvaluationDetail(evaluation);
-      setHumanComment('');
-      setMessage('Human 평가를 저장했습니다.');
-    });
-  };
-
-  const handleEvaluateJudge = async (judgeType: 'LOCAL' | 'CLAUDE') => {
-    const resultId = evaluationDetail?.result.result_id || selectedResult?.result_id || Number(defaultResultId);
-    if (!resultId) {
-      setMessage('재평가할 Result를 선택하세요.');
-      return;
-    }
-    if (evaluatingJudge[judgeType]) {
-      setMessage(`${judgeType} 평가가 이미 실행 중입니다.`);
-      return;
-    }
-    setEvaluatingJudge((prev) => ({ ...prev, [judgeType]: true }));
-    setMessage(`${judgeType} 평가 중...`);
-    try {
-      await evaluateRcaLabResult(resultId, judgeType);
-      const [detail, evaluation] = await Promise.all([
-        fetchRcaLabResult(resultId),
-        fetchRcaLabEvaluation(resultId),
-      ]);
-      setSelectedResult(detail);
-      setEvaluationDetail(evaluation);
-      await refreshAll();
-      setMessage(`${judgeType} 재평가가 완료되었습니다.`);
-    } catch (err: any) {
-      setMessage(err.message || `${judgeType} 재평가 실패`);
-      const evaluation = await fetchRcaLabEvaluation(resultId).catch(() => null);
-      if (evaluation) setEvaluationDetail(evaluation);
-    } finally {
-      setEvaluatingJudge((prev) => ({ ...prev, [judgeType]: false }));
-    }
-  };
-
-  const handleAnalyzePrompt = async () => {
-    if (!metaPromptId) {
-      setMessage('분석할 Prompt를 선택하세요.');
-      return;
-    }
-    await runAction(async () => {
-      const analysis = await analyzeRcaLabPrompt(Number(metaPromptId));
-      setMetaAnalysis(analysis);
-      setMessage('Meta Analyzer 분석을 완료했습니다.');
-    });
-  };
-
-  const handleComparePrompts = async () => {
-    if (!leftComparePromptId || !rightComparePromptId) {
-      setMessage('비교할 Prompt 두 개를 선택하세요.');
-      return;
-    }
-    await runAction(async () => {
-      const comparison = await compareRcaLabPrompts(
-        Number(leftComparePromptId),
-        Number(rightComparePromptId),
-        compareInputId ? Number(compareInputId) : undefined,
-        compareModel || undefined,
-      );
-      setPromptComparison(comparison);
-      setMessage('Prompt 비교를 완료했습니다.');
-    });
-  };
-
-  const renderMetricGrid = (stats?: RcaLabPromptStats | null) => (
-    <div className="rca-lab-metrics">
-      <div><span>Total</span><strong>{formatScore(stats?.average_score)}</strong></div>
-      <div><span>Accuracy</span><strong>{formatScore(stats?.accuracy_average)}</strong></div>
-      <div><span>Reasoning</span><strong>{formatScore(stats?.reasoning_average)}</strong></div>
-      <div><span>Evidence</span><strong>{formatScore(stats?.evidence_average)}</strong></div>
-      <div><span>Actionability</span><strong>{formatScore(stats?.actionability_average)}</strong></div>
-      <div><span>Recent 10</span><strong>{formatScore(stats?.recent_10_average)}</strong></div>
-    </div>
-  );
-
-  const toggleSection = (key: string) => {
-    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
-  const renderEvaluationSection = (key: string, title: string, content: React.ReactNode) => (
-    <section className="rca-eval-section">
-      <button className="rca-eval-section-title" onClick={() => toggleSection(key)}>
-        <span>{openSections[key] ? 'v' : '>'} {title}</span>
-      </button>
-      {openSections[key] && <div className="rca-eval-section-body">{content}</div>}
-    </section>
-  );
-
-  const latestJudgeRows = (judges: RcaLabJudge[]) => {
-    const latest = new Map<string, RcaLabJudge>();
-    judges.forEach((judge) => {
-      if (!latest.has(judge.judge_type)) latest.set(judge.judge_type, judge);
-    });
-    (['LOCAL', 'CLAUDE'] as const).forEach((judgeType) => {
-      if (!latest.has(judgeType)) {
-        latest.set(judgeType, {
-          judge_id: -judgeType.length,
-          result_id: evaluationDetail?.result.result_id || 0,
-          judge_type: judgeType,
-          status: 'READY',
-          update_dt: '',
-        });
-      }
-    });
-    return Array.from(latest.values()).sort((a, b) => {
-      const order = ['LOCAL', 'CLAUDE', 'HUMAN', 'GPT', 'GEMINI'];
-      return order.indexOf(a.judge_type) - order.indexOf(b.judge_type);
-    });
-  };
-
-  return (
-    <div className="rca-lab">
-      <div className="rca-lab-tabs">
-        {[
-          ['inputs', 'INPUT 관리'],
-          ['prompts', 'Prompt 관리'],
-          ['experiments', 'Experiment 실행'],
-          ['results', 'Result 비교'],
-          ['meta', 'Meta Analyzer'],
-          ['human', 'RCA Review'],
-        ].map(([key, label]) => (
-          <button
-            key={key}
-            className={tab === key ? 'active' : ''}
-            onClick={() => setTab(key as Tab)}
-          >
-            {label}
-          </button>
-        ))}
+  return <div className="rca-pipeline-shell">
+    <button className="rca-mobile-session-toggle" onClick={() => setMobileSessionsOpen((v) => !v)}>
+      <span>Sessions</span><strong>{activeResultId ? `Result #${activeResultId}` : '선택 없음'}</strong><span>{mobileSessionsOpen ? '▲' : '▼'}</span>
+    </button>
+    <aside className={`rca-session-sidebar ${mobileSessionsOpen ? 'open' : ''}`}>
+      <div className="rca-session-head"><div><small>RCA LAB</small><h2>Sessions</h2></div><span>{results.length}</span></div>
+      <div className="rca-session-list">{results.map((result) => <button key={result.result_id} className={activeResultId === result.result_id ? 'active' : ''} onClick={() => selectSession(result.result_id)}>
+        <span className="rca-session-status" /><span><strong>{result.input_name || `Input #${result.input_id}`}</strong><small>Result #{result.result_id} · {result.prompt_name || 'Prompt'}</small><time>{formatDate(result.update_dt)}</time></span><b>{formatScore(result.score)}</b>
+      </button>)}{!results.length && <p className="rca-pipeline-empty">아직 생성된 Session이 없습니다.</p>}</div>
+      <div className="rca-session-tools">
+        <strong>새 Input</strong><div><input type="number" min={1000} value={inputChunkSize} onChange={(e) => setInputChunkSize(Number(e.target.value))} />
+        <label>파일<input type="file" accept=".dat,.csv,.txt" onChange={(e) => { const file=e.target.files?.[0]; if (file) action(async () => { await importRcaLabFile(file,inputChunkSize,file.name); }); }} /></label>
+        <button disabled={loading} onClick={() => action(async () => { await importRcaLabSample(inputChunkSize); })}>샘플</button></div>
       </div>
+    </aside>
 
-      {message && <div className="rca-lab-message">{message}</div>}
+    <main className="rca-pipeline-main">
+      <header className="rca-context-header">
+        <div><small>CURRENT RCA SESSION</small><h1>{evaluation?.input.input_name || activeResult?.input_name || 'Session을 선택하세요'}</h1></div>
+        <div className="rca-context-chips"><span>Input <b>#{evaluation?.input.input_id || activeResult?.input_id || '-'}</b></span><span>Prompt <b>#{evaluation?.prompt.prompt_id || activeResult?.prompt_id || '-'}</b></span><span>Experiment <b>#{activeExperiment?.experiment_id || '-'}</b></span><span>Result <b>#{activeResultId || '-'}</b></span></div>
+      </header>
+      {message && <div className="rca-pipeline-message">{message}<button onClick={() => setMessage('')}>×</button></div>}
 
-      {tab === 'inputs' && (
-        <section className="rca-lab-grid">
-          <div className="rca-lab-panel wide">
-            <div className="rca-lab-panel-header">
-              <h2>INPUT 관리</h2>
-              <div className="rca-lab-inline-actions">
-                <input
-                  type="number"
-                  min={1000}
-                  value={inputChunkSize}
-                  onChange={(e) => setInputChunkSize(Number(e.target.value))}
-                  title="chunk size"
-                />
-                <label className="rca-lab-file-btn">
-                  파일 생성
-                  <input
-                    type="file"
-                    accept=".dat,.csv,.txt"
-                    onChange={(e) => handleInputFileImport(e.target.files?.[0])}
-                  />
-                </label>
-                <button disabled={loading} onClick={() => runAction(async () => { await importRcaLabSample(inputChunkSize); setMessage('샘플 INPUT 생성을 요청했습니다.'); })}>
-                  샘플 생성
-                </button>
-              </div>
-            </div>
-            <table className="rca-lab-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>이름</th>
-                  <th>데이터 건수</th>
-                  <th>상태</th>
-                  <th>생성/수정</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {inputs.map((input) => (
-                  <tr key={input.input_id}>
-                    <td>{input.input_id}</td>
-                    <td>{input.input_name}</td>
-                    <td>{input.record_count?.toLocaleString() || '-'}</td>
-                    <td>{input.status}</td>
-                    <td>{formatDate(input.update_dt)}</td>
-                    <td className="rca-lab-actions">
-                      <button onClick={() => handleShowInput(input.input_id)}>상세</button>
-                      <button onClick={() => runAction(() => deleteRcaLabInput(input.input_id))}>삭제</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <pre className="rca-lab-preview">{selectedInput?.text || selectedInput?.description || 'INPUT 상세를 선택하세요.'}</pre>
-        </section>
-      )}
+      <div className="rca-pipeline-flow">
+        <Card step={1} title="INPUT"><div className="rca-summary-row"><div><h3>{evaluation?.input.input_name || 'Input 선택'}</h3><p>{evaluation?.input.summary || 'Session의 분석 입력 데이터입니다.'}</p></div><div className="rca-card-actions"><span>{evaluation?.input.record_count?.toLocaleString() || '-'} records</span><button disabled={!evaluation} onClick={() => showText('Input 원문', evaluation?.input.text)}>원문 보기</button></div></div>
+          <div className="rca-manage-row"><select value={inputId} onChange={(e)=>setInputId(e.target.value)}>{inputs.map((item)=><option key={item.input_id} value={item.input_id}>#{item.input_id} {item.input_name}</option>)}</select><button disabled={!inputId} onClick={() => action(async()=>{ const detail=await fetchRcaLabInput(Number(inputId)); showText(detail.input_name,detail.text || detail.description); })}>조회</button><button className="danger" disabled={!inputId} onClick={()=>action(()=>deleteRcaLabInput(Number(inputId)))}>삭제</button></div>
+        </Card>
 
-      {tab === 'prompts' && (
-        <section className="rca-lab-grid">
-          <div className="rca-lab-panel">
-            <h2>Prompt 목록</h2>
-            <table className="rca-lab-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Name</th>
-                  <th>Version</th>
-                  <th>실행</th>
-                  <th>평균</th>
-                  <th>최근10</th>
-                  <th>Reasoning</th>
-                  <th>Evidence</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {prompts.map((prompt) => (
-                  <tr key={prompt.prompt_id}>
-                    <td>{prompt.prompt_id}</td>
-                    <td>{prompt.prompt_name}</td>
-                    <td>{prompt.version}</td>
-                    <td>{prompt.execution_count || 0}</td>
-                    <td>{formatScore(prompt.average_score)}</td>
-                    <td>{formatScore(prompt.recent_10_average)}</td>
-                    <td>{formatScore(prompt.reasoning_average)}</td>
-                    <td>{formatScore(prompt.evidence_average)}</td>
-                    <td className="rca-lab-actions">
-                      <button onClick={() => handleShowPrompt(prompt.prompt_id)}>열기</button>
-                      <button onClick={() => { setMetaPromptId(String(prompt.prompt_id)); setTab('meta'); }}>분석</button>
-                      <button onClick={() => runAction(() => deleteRcaLabPrompt(prompt.prompt_id))}>삭제</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="rca-lab-panel">
-            <div className="rca-lab-panel-header">
-              <h2>{selectedPrompt ? `${selectedPrompt.prompt_name} 수정` : 'Prompt 등록'}</h2>
-              {selectedPrompt && <button onClick={() => { setSelectedPrompt(null); setSelectedPromptStats(null); setSelectedPromptComments([]); setPromptText(''); }}>새 Prompt</button>}
-            </div>
-            {selectedPromptStats && renderMetricGrid(selectedPromptStats)}
-            {selectedPromptComments.length > 0 && (
-              <div className="rca-lab-comment-box">
-                <h3>Comment 빈도</h3>
-                {selectedPromptComments.slice(0, 5).map((item) => (
-                  <div key={item.comment} className="rca-lab-comment-row">
-                    <span>{item.comment}</span>
-                    <strong>{item.count}</strong>
-                  </div>
-                ))}
-              </div>
-            )}
-            <textarea
-              className="rca-lab-textarea"
-              value={promptText}
-              onChange={(e) => setPromptText(e.target.value)}
-              placeholder="RCA system prompt를 입력하세요."
-            />
-            <button disabled={loading || !promptText.trim()} onClick={handlePromptSave}>
-              {selectedPrompt ? '수정 저장' : '등록'}
-            </button>
-          </div>
-        </section>
-      )}
+        <Card step={2} title="PROMPT"><div className="rca-summary-row"><div><h3>{evaluation?.prompt.prompt_name || 'Prompt 선택'}</h3><p>{evaluation ? `${evaluation.prompt.version} · Prompt #${evaluation.prompt.prompt_id}` : 'Experiment에 사용할 Prompt를 선택하세요.'}</p></div><div className="rca-card-actions"><button disabled={!evaluation} onClick={() => showText('Prompt 전문',evaluation?.prompt.text)}>전문 보기</button></div></div>
+          <div className="rca-manage-row"><select value={promptId} onChange={(e)=>setPromptId(e.target.value)}>{prompts.map((item)=><option key={item.prompt_id} value={item.prompt_id}>#{item.prompt_id} {item.prompt_name} {item.version}</option>)}</select><button onClick={()=>openPromptEditor(Number(promptId))}>편집</button><button onClick={()=>openPromptEditor()}>새 Prompt</button><button className="danger" disabled={!promptId} onClick={()=>action(()=>deleteRcaLabPrompt(Number(promptId)))}>삭제</button></div>
+          {(editingPrompt || promptText !== '') && <div className="rca-inline-editor"><textarea value={promptText} onChange={(e)=>setPromptText(e.target.value)} placeholder="RCA system prompt"/><div><button onClick={()=>{setEditingPrompt(null);setPromptText('');}}>취소</button><button disabled={!promptText.trim() || loading} onClick={savePrompt}>저장</button></div></div>}
+        </Card>
 
-      {tab === 'experiments' && (
-        <section className="rca-lab-grid">
-          <div className="rca-lab-panel">
-            <h2>Experiment 실행</h2>
-            <label>INPUT</label>
-            <select value={experimentInputId} onChange={(e) => setExperimentInputId(e.target.value)}>
-              {inputs.map((input) => <option key={input.input_id} value={input.input_id}>{input.input_name}</option>)}
-            </select>
-            <label>Prompt</label>
-            <select value={experimentPromptId} onChange={(e) => setExperimentPromptId(e.target.value)}>
-              {prompts.map((prompt) => <option key={prompt.prompt_id} value={prompt.prompt_id}>{prompt.prompt_name}</option>)}
-            </select>
-            <label>Model</label>
-            <select value={experimentModel} onChange={(e) => setExperimentModel(e.target.value)}>
-              {models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
-            </select>
-            <label>실행횟수</label>
-            <input type="number" min={1} max={100} value={experimentCount} onChange={(e) => setExperimentCount(Number(e.target.value))} />
-            <button disabled={loading || !experimentInputId || !experimentPromptId} onClick={handleRunExperiment}>
-              실행
-            </button>
-            <div className="rca-progress-card">
-              <div className="rca-progress-head">
-                <strong>{experimentStatus}</strong>
-                <span>{experimentProgress}%</span>
-              </div>
-              <div className="rca-progress-bar">
-                <div style={{ width: `${experimentProgress}%` }} />
-              </div>
-              <small>{experimentProgressText}</small>
-            </div>
-          </div>
-          <div className="rca-lab-panel wide">
-            <h2>Experiment 이력</h2>
-            <table className="rca-lab-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>INPUT</th>
-                  <th>Prompt</th>
-                  <th>Model</th>
-                  <th>상태</th>
-                  <th>Result</th>
-                  <th>일시</th>
-                </tr>
-              </thead>
-              <tbody>
-                {experiments.map((experiment) => (
-                  <tr key={experiment.step_id}>
-                    <td>{experiment.experiment_id}</td>
-                    <td>{experiment.input_name}</td>
-                    <td>{experiment.prompt_name}</td>
-                    <td>{experiment.model}</td>
-                    <td>{experiment.status}</td>
-                    <td>{experiment.result_id || '-'}</td>
-                    <td>{formatDate(experiment.update_dt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
+        <Card step={3} title="EXPERIMENT"><div className="rca-experiment-grid"><label>Input<select value={inputId} onChange={(e)=>setInputId(e.target.value)}>{inputs.map((item)=><option key={item.input_id} value={item.input_id}>{item.input_name}</option>)}</select></label><label>Prompt<select value={promptId} onChange={(e)=>setPromptId(e.target.value)}>{prompts.map((item)=><option key={item.prompt_id} value={item.prompt_id}>{item.prompt_name}</option>)}</select></label><label>Model<select value={experimentModel} onChange={(e)=>setExperimentModel(e.target.value)}>{models.map((item)=><option key={item.name}>{item.name}</option>)}</select></label><label>Count<input type="number" min={1} max={100} value={experimentCount} onChange={(e)=>setExperimentCount(Number(e.target.value))}/></label><button className="primary" disabled={loading || !inputId || !promptId} onClick={runExperiment}>{loading ? '처리 중…' : 'Experiment 실행'}</button></div>
+          <div className="rca-progress"><div><span>{progressText}</span><b>{progress}%</b></div><i><span style={{width:`${progress}%`}}/></i></div>
+        </Card>
 
-      {tab === 'results' && (
-        <section className="rca-lab-grid">
-          <div className="rca-lab-panel">
-            <div className="rca-lab-panel-header">
-              <h2>Result 비교</h2>
-              <div className="rca-lab-inline-actions">
-                <select value={compareInputId} onChange={(e) => setCompareInputId(e.target.value)}>
-                  <option value="">전체 INPUT</option>
-                  {inputs.map((input) => <option key={input.input_id} value={input.input_id}>{input.input_name}</option>)}
-                </select>
-                <select value={compareModel} onChange={(e) => setCompareModel(e.target.value)}>
-                  <option value="">전체 MODEL</option>
-                  {models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
-                </select>
-                <button onClick={() => runAction(async () => {
-                  const inputId = compareInputId ? Number(compareInputId) : undefined;
-                  const model = compareModel || undefined;
-                  setResults(await fetchRcaLabResults(inputId, model));
-                  setPromptPerformance(await fetchRcaLabPromptPerformance(inputId, model));
-                })}>조회</button>
-              </div>
-            </div>
-            <h3>Prompt 성능 통계</h3>
-            <table className="rca-lab-table compact">
-              <thead>
-                <tr>
-                  <th>Prompt</th>
-                  <th>실행</th>
-                  <th>Total</th>
-                  <th>Accuracy</th>
-                  <th>Reasoning</th>
-                  <th>Evidence</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {promptPerformance.map((prompt) => (
-                  <tr key={prompt.prompt_id}>
-                    <td>{prompt.prompt_name}</td>
-                    <td>{prompt.execution_count}</td>
-                    <td>{formatScore(prompt.average_score)}</td>
-                    <td>{formatScore(prompt.accuracy_average)}</td>
-                    <td>{formatScore(prompt.reasoning_average)}</td>
-                    <td>{formatScore(prompt.evidence_average)}</td>
-                    <td>{formatScore(prompt.actionability_average)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <h3>개별 Result</h3>
-            <table className="rca-lab-table">
-              <thead>
-                <tr>
-                  <th>Result</th>
-                  <th>INPUT</th>
-                  <th>Prompt</th>
-                  <th>Model</th>
-                  <th>평균</th>
-                  <th>정확</th>
-                  <th>근거</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {results.map((result) => (
-                  <tr key={result.result_id}>
-                    <td>{result.result_id}</td>
-                    <td>{result.input_name}</td>
-                    <td>{result.prompt_name}</td>
-                    <td>{result.model || '-'}</td>
-                    <td>{formatScore(result.score)}</td>
-                    <td>{formatScore(result.accuracy_score)}</td>
-                    <td>{formatScore(result.evidence_score)}</td>
-                    <td><button onClick={() => handleShowResult(result.result_id)}>보기</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <pre className="rca-lab-preview">{selectedResult?.text || selectedResult?.result_preview || 'Result를 선택하세요.'}</pre>
-        </section>
-      )}
+        <Card step={4} title="RESULT"><div className="rca-result-head"><div><h3>Result #{activeResultId || '-'}</h3><p>{activeResult?.model || activeExperiment?.model || '-'} · {formatDate(activeResult?.update_dt)}</p></div><strong className="rca-result-score">{formatScore(activeResult?.score)}</strong></div>
+          <div className="rca-result-preview">{activeResult?.result_preview || selectedResult?.text?.slice(0,600) || 'Session을 선택하면 Result가 표시됩니다.'}</div>
+          <div className="rca-card-actions"><button disabled={!selectedResult} onClick={()=>showText(`Result #${activeResultId}`,selectedResult?.text)}>전체 결과 보기</button><select value={compareResultId} onChange={(e)=>setCompareResultId(e.target.value)}><option value="">Result 선택</option>{results.filter((r)=>r.result_id!==activeResultId).map((r)=><option key={r.result_id} value={r.result_id}>Result #{r.result_id} · {r.prompt_name}</option>)}</select><button disabled={!compareResultId} onClick={async()=>{const other=await fetchRcaLabResult(Number(compareResultId));setModal({title:`Result #${activeResultId} vs #${compareResultId}`,content:<div className="rca-side-compare"><pre>{selectedResult?.text}</pre><pre>{other.text || other.result_preview}</pre></div>});}}>Compare</button></div>
+        </Card>
 
-      {tab === 'meta' && (
-        <section className="rca-lab-grid">
-          <div className="rca-lab-panel">
-            <h2>Prompt 분석</h2>
-            <label>분석 대상 Prompt</label>
-            <select value={metaPromptId} onChange={(e) => setMetaPromptId(e.target.value)}>
-              {prompts.map((prompt) => <option key={prompt.prompt_id} value={prompt.prompt_id}>{prompt.prompt_name}</option>)}
-            </select>
-            <button disabled={loading || !metaPromptId} onClick={handleAnalyzePrompt}>Prompt 분석</button>
+        <Card step={5} title="META ANALYZER"><div className="rca-card-actions"><button className="primary" disabled={!evaluation || loading} onClick={analyzePrompt}>현재 Prompt 분석</button><select value={comparePromptId} onChange={(e)=>setComparePromptId(e.target.value)}><option value="">비교 Prompt 선택</option>{prompts.filter((p)=>p.prompt_id!==evaluation?.prompt.prompt_id).map((p)=><option key={p.prompt_id} value={p.prompt_id}>{p.prompt_name} {p.version}</option>)}</select><button disabled={!comparePromptId || loading} onClick={compare}>Prompt 비교</button></div>
+          {metaAnalysis ? <div className="rca-meta-content">{metrics(metaAnalysis.stats)}<div className="rca-meta-columns"><div><h3>강점</h3><ul>{metaAnalysis.analysis.strengths.map((x)=><li key={x}>{x}</li>)}</ul></div><div><h3>개선 필요</h3><ul>{[...metaAnalysis.analysis.weaknesses,...metaAnalysis.improvement_proposal.items].map((x)=><li key={x}>{x}</li>)}</ul></div></div></div> : <p className="rca-pipeline-empty">현재 Session의 Prompt를 분석해 성능과 개선점을 확인하세요.</p>}
+        </Card>
 
-            {metaAnalysis && (
-              <div className="rca-lab-analysis">
-                {renderMetricGrid(metaAnalysis.stats)}
-                <h3>강점</h3>
-                <ul>{metaAnalysis.analysis.strengths.map((item) => <li key={item}>{item}</li>)}</ul>
-                <h3>약점</h3>
-                <ul>{metaAnalysis.analysis.weaknesses.map((item) => <li key={item}>{item}</li>)}</ul>
-                <h3>자주 발생하는 문제</h3>
-                <ul>{metaAnalysis.analysis.frequent_issues.map((item) => <li key={item}>{item}</li>)}</ul>
-                <h3>개선 제안</h3>
-                <ul>{metaAnalysis.improvement_proposal.items.map((item) => <li key={item}>{item}</li>)}</ul>
-              </div>
-            )}
-          </div>
-
-          <div className="rca-lab-panel">
-            <h2>Prompt 차수 비교</h2>
-            <label>비교 조건 INPUT</label>
-            <select value={compareInputId} onChange={(e) => setCompareInputId(e.target.value)}>
-              <option value="">전체 INPUT</option>
-              {inputs.map((input) => <option key={input.input_id} value={input.input_id}>{input.input_name}</option>)}
-            </select>
-            <label>비교 조건 MODEL</label>
-            <select value={compareModel} onChange={(e) => setCompareModel(e.target.value)}>
-              <option value="">전체 MODEL</option>
-              {models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
-            </select>
-            <label>기준 Prompt</label>
-            <select value={leftComparePromptId} onChange={(e) => setLeftComparePromptId(e.target.value)}>
-              {prompts.map((prompt) => <option key={prompt.prompt_id} value={prompt.prompt_id}>{prompt.prompt_name}</option>)}
-            </select>
-            <label>비교 Prompt</label>
-            <select value={rightComparePromptId} onChange={(e) => setRightComparePromptId(e.target.value)}>
-              {prompts.map((prompt) => <option key={prompt.prompt_id} value={prompt.prompt_id}>{prompt.prompt_name}</option>)}
-            </select>
-            <button disabled={loading || !leftComparePromptId || !rightComparePromptId} onClick={handleComparePrompts}>Prompt 비교</button>
-
-            {promptComparison && (
-              <div className="rca-lab-analysis">
-                <h3>변화 요약</h3>
-                <p>{promptComparison.change_summary}</p>
-                <table className="rca-lab-table compact">
-                  <thead>
-                    <tr>
-                      <th>Metric</th>
-                      <th>{promptComparison.left.prompt_name}</th>
-                      <th>{promptComparison.right.prompt_name}</th>
-                      <th>Delta</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[
-                      ['Total Score', 'average_score', 'total_score'],
-                      ['Accuracy', 'accuracy_average', 'accuracy'],
-                      ['Reasoning', 'reasoning_average', 'reasoning'],
-                      ['Evidence', 'evidence_average', 'evidence'],
-                      ['Actionability', 'actionability_average', 'actionability'],
-                    ].map(([label, statKey, deltaKey]) => (
-                      <tr key={label}>
-                        <td>{label}</td>
-                        <td>{formatScore((promptComparison.left.stats as any)[statKey])}</td>
-                        <td>{formatScore((promptComparison.right.stats as any)[statKey])}</td>
-                        <td>{formatScore(promptComparison.deltas[deltaKey])}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-
-      {tab === 'human' && (
-        <section className="rca-lab-grid">
-          <div className="rca-lab-panel wide">
-            <h2>RCA Review</h2>
-            <label>Result</label>
-            <select
-              value={selectedResult?.result_id || defaultResultId}
-              onChange={(e) => handleShowResult(Number(e.target.value))}
-            >
-              {results.map((result) => <option key={result.result_id} value={result.result_id}>Result #{result.result_id} / {result.prompt_name}</option>)}
-            </select>
-            {!evaluationDetail && <div className="rca-lab-message">평가할 Result를 선택하세요.</div>}
-            {evaluationDetail && (
-              <div className="rca-evaluation">
-                {renderEvaluationSection('input', 'INPUT', (
-                  <>
-                    <div className="rca-eval-meta">
-                      <span>ID #{evaluationDetail.input.input_id}</span>
-                      <span>{evaluationDetail.input.input_name}</span>
-                      <span>{evaluationDetail.input.record_count?.toLocaleString() || '-'} records</span>
-                    </div>
-                    <h3>요약</h3>
-                    <pre>{evaluationDetail.input.summary}</pre>
-                    <h3>원문</h3>
-                    <pre>{evaluationDetail.input.text}</pre>
-                  </>
-                ))}
-                {renderEvaluationSection('prompt', 'PROMPT', (
-                  <>
-                    <div className="rca-eval-meta">
-                      <span>{evaluationDetail.prompt.prompt_name}</span>
-                      <span>{evaluationDetail.prompt.version}</span>
-                    </div>
-                    <pre>{evaluationDetail.prompt.text}</pre>
-                  </>
-                ))}
-                {renderEvaluationSection('result', 'RESULT', (
-                  <pre>{evaluationDetail.result.text}</pre>
-                ))}
-                {renderEvaluationSection('score', 'SCORE', (
-                  <div className="rca-lab-metrics">
-                    <div><span>Total</span><strong>{formatScore(evaluationDetail.score.total_score)}</strong></div>
-                    <div><span>Accuracy</span><strong>{formatScore(evaluationDetail.score.accuracy_score)}</strong></div>
-                    <div><span>Reasoning</span><strong>{formatScore(evaluationDetail.score.reasoning_score)}</strong></div>
-                    <div><span>Evidence</span><strong>{formatScore(evaluationDetail.score.evidence_score)}</strong></div>
-                    <div><span>Actionability</span><strong>{formatScore(evaluationDetail.score.actionability_score)}</strong></div>
-                  </div>
-                ))}
-                {renderEvaluationSection('comment', 'COMMENT', (
-                  <div className="rca-eval-comments">
-                    <p><strong>Accuracy</strong>{evaluationDetail.comment.accuracy_comment || '-'}</p>
-                    <p><strong>Reasoning</strong>{evaluationDetail.comment.reasoning_comment || '-'}</p>
-                    <p><strong>Evidence</strong>{evaluationDetail.comment.evidence_comment || '-'}</p>
-                    <p><strong>Actionability</strong>{evaluationDetail.comment.actionability_comment || '-'}</p>
-                    <p><strong>Overall</strong>{evaluationDetail.comment.evaluation_comment || '-'}</p>
-                  </div>
-                ))}
-                {renderEvaluationSection('judges', 'JUDGE 비교', (
-                  <table className="rca-lab-table compact">
-                    <thead>
-                      <tr>
-                        <th>Type</th>
-                        <th>Status</th>
-                        <th>Total</th>
-                        <th>Accuracy</th>
-                        <th>Reasoning</th>
-                        <th>Evidence</th>
-                        <th>Action</th>
-                        <th>Comment</th>
-                        <th>기능</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {latestJudgeRows(evaluationDetail.judges).map((judge) => {
-                        const judgeType = judge.judge_type as 'LOCAL' | 'CLAUDE';
-                        const canEvaluate = judge.judge_type === 'LOCAL' || judge.judge_type === 'CLAUDE';
-                        const running = evaluatingJudge[judge.judge_type] || judge.status === 'RUNNING';
-                        return (
-                          <React.Fragment key={`${judge.judge_type}-${judge.judge_id}`}>
-                            <tr>
-                              <td>{judge.judge_type}</td>
-                              <td>{running ? 'RUNNING' : judge.status}</td>
-                              <td>{formatScore(judge.total_score)}</td>
-                              <td>{formatScore(judge.accuracy_score)}</td>
-                              <td>{formatScore(judge.reasoning_score)}</td>
-                              <td>{formatScore(judge.evidence_score)}</td>
-                              <td>{formatScore(judge.actionability_score)}</td>
-                              <td>{judge.status === 'FAILED' ? (judge.error_type || '평가 실패') : (judge.judge_comment || '-')}</td>
-                              <td className="rca-lab-actions">
-                                {canEvaluate && (
-                                  <button disabled={running} onClick={() => handleEvaluateJudge(judgeType)}>
-                                    {running ? '평가 중...' : '다시 평가'}
-                                  </button>
-                                )}
-                                {(judge.error_message || judge.raw_response) && (
-                                  <button onClick={() => setExpandedJudgeId(expandedJudgeId === judge.judge_id ? null : judge.judge_id)}>
-                                    상세
-                                  </button>
-                                )}
-                              </td>
-                            </tr>
-                            {expandedJudgeId === judge.judge_id && (
-                              <tr>
-                                <td colSpan={9}>
-                                  <div className="rca-judge-detail">
-                                    <p><strong>Error Type</strong>{judge.error_type || '-'}</p>
-                                    <p><strong>Error Message</strong>{judge.error_message || judge.judge_comment || '-'}</p>
-                                    <p><strong>발생 시각</strong>{judge.update_dt ? formatDate(judge.update_dt) : '-'}</p>
-                                    <h3>Raw Response</h3>
-                                    <pre>{judge.raw_response || '-'}</pre>
-                                  </div>
-                                </td>
-                              </tr>
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="rca-lab-panel">
-            <h2>Human Override</h2>
-            <p className="rca-lab-help">LOCAL Judge와 CLAUDE Judge 결과를 검토한 뒤 사람이 선택적으로 남기는 평가입니다. 향후 GPT/GEMINI/DeepSeek Judge도 같은 구조에 저장할 수 있습니다.</p>
-            <label>평가</label>
-            <div className="rca-lab-rating">
-              {['GOOD', 'NORMAL', 'BAD'].map((rating) => (
-                <button key={rating} className={humanRating === rating ? 'active' : ''} onClick={() => setHumanRating(rating)}>
-                  {rating}
-                </button>
-              ))}
-            </div>
-            <label>Comment</label>
-            <textarea className="rca-lab-textarea small" value={humanComment} onChange={(e) => setHumanComment(e.target.value)} />
-            <button disabled={loading || results.length === 0} onClick={handleHumanSave}>Human Override 저장</button>
-          </div>
-        </section>
-      )}
-    </div>
-  );
+        <Card step={6} title="HUMAN REVIEW"><div className="rca-review-layout"><div><h3>Judge Result</h3>{evaluation ? <div className="rca-judge-list">{latestJudges(evaluation.judges).map((judge)=><div key={`${judge.judge_type}-${judge.judge_id}`}><span><b>{judge.judge_type}</b><small>{judge.status}</small></span><strong>{formatScore(judge.total_score)}</strong>{(judge.judge_type==='LOCAL'||judge.judge_type==='CLAUDE')&&<button disabled={evaluating[judge.judge_type]} onClick={()=>evaluateJudge(judge.judge_type as 'LOCAL'|'CLAUDE')}>{evaluating[judge.judge_type]?'평가 중':'재평가'}</button>}<p>{judge.judge_comment || judge.error_message || '-'}</p></div>)}</div>:<p className="rca-pipeline-empty">Judge 결과가 없습니다.</p>}</div>
+            <div className="rca-human-review"><h3>Human Override</h3><div className="rca-rating">{['GOOD','NORMAL','BAD'].map((rating)=><button key={rating} className={humanRating===rating?`active ${rating.toLowerCase()}`:''} onClick={()=>setHumanRating(rating)}>{rating}</button>)}</div><label>Comment<textarea value={humanComment} onChange={(e)=>setHumanComment(e.target.value)} placeholder="판단 근거와 확인 사항을 남겨주세요."/></label><button className="primary" disabled={!activeResultId || loading} onClick={saveHumanReview}>Human Override 저장</button></div></div>
+        </Card>
+      </div>
+    </main>
+    {modal && <div className="rca-modal-backdrop" onMouseDown={()=>setModal(null)}><div className="rca-pipeline-modal" onMouseDown={(e)=>e.stopPropagation()}><header><h2>{modal.title}</h2><button onClick={()=>setModal(null)}>×</button></header><div>{modal.content}</div></div></div>}
+  </div>;
 }

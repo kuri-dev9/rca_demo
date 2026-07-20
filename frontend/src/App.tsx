@@ -572,7 +572,7 @@ function App() {
 
   return (
     <div className="app">
-      {!sidebarCollapsed && (
+      {!sidebarCollapsed && !rcaLabOpen && (
         <Sidebar
           conversations={conversations}
           activeId={activeConvId}
